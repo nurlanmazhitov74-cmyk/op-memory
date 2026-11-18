@@ -709,48 +709,128 @@ async function anilist(query, variables, st) {
   }
   throw new Error('AniList kept rate-limiting');
 }
-/* AnimeThemes JSON:API. Two filter syntaxes and two artist include paths are tried, and whichever works is kept. */
-const AT_FILTERS = [
-  ids => `filter[has]=resources&filter[site]=AniList&filter[external_id]=${ids}`,
-  ids => `filter[resources][site]=AniList&filter[resources][external_id]=${ids}`
-];
-const AT_INCLUDES = [
-  'resources,animethemes.song.artists,animethemes.animethemeentries.videos',
-  'resources,animethemes.song.performances.artist,animethemes.animethemeentries.videos'
-];
-let atF = 0, atI = 0;
-async function atGet(url, st) {
+/* AnimeThemes GraphQL. Their schema is read at runtime (introspection) and the query is built from the
+   field names that actually exist, so renames like animethemes→themes or lists→connections don't break it. */
+const AT_GQL = 'https://graphql.animethemes.moe/';
+async function atPost(query, st) {
   for (let a = 0; a < 6; a++) {
     let r;
-    try { r = await fetch(url, { headers: { Accept: 'application/json' } }); }
+    try { r = await fetch(AT_GQL, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ query }) }); }
     catch (e) { if (a < 2) { await sleep(3000); continue; } throw new Error('AnimeThemes unreachable (' + e.message + ')'); }
     if (r.status === 429) { st && st('AnimeThemes asked to slow down. Waiting 60s…'); await sleep(61000); continue; }
-    if (!r.ok) { const t = await r.text().catch(() => ''); const e = new Error('AnimeThemes ' + r.status + ': ' + t.slice(0, 200)); e.status = r.status; throw e; }
-    return r.json();
+    const j = await r.json().catch(() => null);
+    if (!j) throw new Error('AnimeThemes ' + r.status + ': not JSON');
+    if (j.errors && !j.data) { const e = new Error('AnimeThemes: ' + JSON.stringify(j.errors).slice(0, 400)); e.gql = true; throw e; }
+    if (j.errors) log('AT partial errors: ' + JSON.stringify(j.errors).slice(0, 300));
+    return j.data;
   }
   throw new Error('AnimeThemes kept rate-limiting');
 }
-function alIdOf(a) {
-  const r = (a.resources || []).find(x => String(x.site).toLowerCase() === 'anilist');
-  return r ? Number(r.external_id) : null;
+const TREF = 'fragment T on __Type{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name}}}}}';
+const typeCache = {};
+async function getType(name) {
+  if (typeCache[name]) return typeCache[name];
+  const d = await atPost(`{t:__type(name:${JSON.stringify(name)}){name kind fields{name args{name type{...T}} type{...T}} enumValues{name} possibleTypes{name}}} ${TREF}`);
+  if (!d || !d.t) throw new Error('AnimeThemes schema has no type ' + name);
+  return typeCache[name] = d.t;
 }
-async function themesFor(ids, st) {
-  const idset = new Set(ids); let lastErr = null;
-  for (let fi = atF; fi < AT_FILTERS.length; fi++) {
-    for (let ii = atI; ii < AT_INCLUDES.length; ii++) {
-      let url = `https://api.animethemes.moe/anime?${AT_FILTERS[fi](ids.join(','))}&include=${AT_INCLUDES[ii]}&page[size]=100`;
-      const out = []; let pages = 0;
-      try {
-        while (url && pages < 4) { const j = await atGet(url, st); out.push(...(j.anime || [])); url = j.links && j.links.next; pages++; if (url) await sleep(700); }
-      } catch (e) { lastErr = e; log(`AT f${fi} i${ii}: ${e.message}`); if (e.status === 400 || e.status === 422) continue; throw e; }
-      const matched = out.filter(a => idset.has(alIdOf(a)));
-      if (out.length && matched.length >= out.length * 0.5) { atF = fi; atI = ii; return matched; }
-      log(`AT f${fi} i${ii}: got ${out.length}, matched ${matched.length}`);
-      if (!out.length) { lastErr = new Error('AnimeThemes returned no anime'); }
-      break; // include path worked, filter didn't: try next filter
+function named(t) { while (t && t.ofType) t = t.ofType; return t; }
+function isList(t) { while (t) { if (t.kind === 'LIST') return true; t = t.ofType; } return false; }
+function fieldOf(T, ...names) { for (const n of names) { const f = (T.fields || []).find(x => x.name === n); if (f) return f; } return null; }
+/* Works out how to select a relation: plain object/list, or a connection with nodes / edges.node / data. */
+async function relation(T, ...names) {
+  const f = fieldOf(T, ...names); if (!f) return null;
+  const args = (f.args || []).some(a => a.name === 'first') ? '(first:50)' : '';
+  const R = await getType(named(f.type).name);
+  for (const w of ['nodes', 'data']) { const g = fieldOf(R, w); if (g && R.kind === 'OBJECT' && /Connection|Paginat|Paginator/i.test(R.name)) return { name: f.name, args, wrap: w, T: await getType(named(g.type).name) }; }
+  const e = fieldOf(R, 'edges');
+  if (e && /Connection/i.test(R.name)) { const E = await getType(named(e.type).name); const nf = fieldOf(E, 'node'); return { name: f.name, args, wrap: 'edges', T: await getType(named(nf.type).name) }; }
+  return { name: f.name, args, wrap: null, T: R };
+}
+function sel(rel, inner) {
+  if (!rel) return '';
+  const body = rel.wrap === 'edges' ? `edges{node{${inner}}}` : rel.wrap ? `${rel.wrap}{${inner}}` : inner;
+  return `${rel.name}${rel.args}{${body}}`;
+}
+const scalars = (T, names) => names.filter(n => fieldOf(T, n)).join(' ');
+function items(v, rel) {
+  if (v == null) return [];
+  if (rel && rel.wrap === 'edges') return (v.edges || []).map(e => e && e.node).filter(Boolean);
+  if (rel && rel.wrap) return v[rel.wrap] || [];
+  return Array.isArray(v) ? v : [v];
+}
+let AT = null; // the built plan
+async function atPlan() {
+  if (AT) return AT;
+  const Q = await getType('Query');
+  const f = fieldOf(Q, 'findAnimeByExternalSite');
+  if (!f) throw new Error('AnimeThemes has no findAnimeByExternalSite query any more');
+  const siteArg = f.args.find(a => a.name === 'site'), idArg = f.args.find(a => /^(id|external_id|externalId)$/.test(a.name));
+  if (!siteArg || !idArg) throw new Error('findAnimeByExternalSite args changed: ' + f.args.map(a => a.name).join(','));
+  const st = named(siteArg.type); let siteLit = '"AniList"';
+  if (st.kind === 'ENUM') { const E = await getType(st.name); const v = (E.enumValues || []).find(x => /anilist/i.test(x.name)); if (!v) throw new Error('No AniList site value'); siteLit = v.name; }
+  const idTypeName = named(idArg.type).name;
+  const idLit = id => { const x = /String|ID/.test(idTypeName) ? JSON.stringify(String(id)) : String(id); return isList(idArg.type) ? `[${x}]` : x; };
+  // build the selection
+  const A = await getType(named(f.type).name);
+  const rTh = await relation(A, 'animethemes', 'themes'); if (!rTh) throw new Error('Anime type has no themes field');
+  const Th = rTh.T;
+  const rSong = await relation(Th, 'song');
+  let songSel = '', rArt = null, rPerf = null, perfSel = '';
+  if (rSong) {
+    rArt = await relation(rSong.T, 'artists');
+    if (rArt) songSel = `title ${sel(rArt, scalars(rArt.T, ['name']))}`;
+    else {
+      rPerf = await relation(rSong.T, 'performances');
+      if (rPerf) {
+        const P = rPerf.T; const af = fieldOf(P, 'artist');
+        let artSel = '';
+        if (af) {
+          const AT2 = await getType(named(af.type).name);
+          if (AT2.kind === 'UNION' || AT2.kind === 'INTERFACE') {
+            const ok = [];
+            for (const p of AT2.possibleTypes || []) { try { if (fieldOf(await getType(p.name), 'name')) ok.push(p.name); } catch (e) {} }
+            artSel = `artist{__typename ${ok.map(n => `... on ${n}{name}`).join(' ')}}`;
+          }
+          else artSel = `artist{name}`;
+        }
+        perfSel = `${scalars(P, ['as', 'alias'])} ${artSel}`;
+        songSel = `title ${sel(rPerf, perfSel)}`;
+      } else songSel = 'title';
     }
   }
-  throw lastErr || new Error('AnimeThemes data did not match AniList ids');
+  const rEnt = await relation(Th, 'animethemeentries', 'entries');
+  const rVid = rEnt ? await relation(rEnt.T, 'videos') : null;
+  const vidSel = rVid ? sel(rVid, scalars(rVid.T, ['link', 'basename', 'resolution', 'nc', 'overlap', 'lyrics', 'subbed'])) : '';
+  const entSel = rEnt ? sel(rEnt, `${scalars(rEnt.T, ['version', 'spoiler', 'nsfw'])} ${vidSel}`) : '';
+  const thSel = sel(rTh, `${scalars(Th, ['type', 'sequence', 'slug'])} ${rSong ? `song{${songSel}}` : ''} ${entSel}`);
+  const aSel = `${scalars(A, ['name', 'slug', 'year'])} ${thSel}`;
+  AT = { query: ids => `{${ids.map(id => `a${id}:findAnimeByExternalSite(site:${siteLit},${idArg.name}:${idLit(id)}){${aSel}}`).join(' ')}}`,
+    norm: (raw, alId) => {
+      const songOf = so => so ? { title: so.title, artists: rArt ? items(so[rArt.name], rArt).map(x => ({ name: x.name })) : rPerf ? items(so[rPerf.name], rPerf).map(p => ({ name: (p.artist && p.artist.name) || p.as || p.alias })) : [] } : null;
+      return items(raw).map(a => ({ _al: alId, name: a.name, slug: a.slug, year: a.year,
+        animethemes: items(a[rTh.name], rTh).map(t => ({ type: t.type, sequence: t.sequence, slug: t.slug, song: songOf(t.song),
+          animethemeentries: rEnt ? items(t[rEnt.name], rEnt).map(e => ({ version: e.version, spoiler: e.spoiler, nsfw: e.nsfw, videos: rVid ? items(e[rVid.name], rVid) : [] })) : [] })) }));
+    } };
+  log('AT plan: ' + AT.query([1]).slice(0, 600));
+  return AT;
+}
+let atBatch = 25;
+async function themesFor(ids, st) {
+  const plan = await atPlan(); const out = [];
+  for (let i = 0; i < ids.length;) {
+    const chunk = ids.slice(i, i + atBatch);
+    let d;
+    try { d = await atPost(plan.query(chunk), st); }
+    catch (e) {
+      if (e.gql && atBatch > 1) { atBatch = Math.max(1, Math.floor(atBatch / 2)); log('AT batch -> ' + atBatch); continue; }
+      throw e;
+    }
+    for (const id of chunk) { const raw = d && d['a' + id]; if (raw) out.push(...plan.norm(raw, id).slice(0, 1)); }
+    i += chunk.length;
+    if (i < ids.length) await sleep(800);
+  }
+  return out;
 }
 function pickVideo(entries) {
   let best = null, bs = 1e9;
@@ -803,7 +883,7 @@ async function buildSongs(st) {
     st(`Getting openings from AnimeThemes… ${b + 1}/${nb}`, 0.45 + (b + 1) / nb * 0.55);
     const ids = al.slice(b * B, (b + 1) * B).map(m => m.id);
     const list = await themesFor(ids, st);
-    for (const a of list) { const id = alIdOf(a); candidatesFrom(a, alById.get(id), rank.get(id), cands); }
+    for (const a of list) candidatesFrom(a, alById.get(a._al), rank.get(a._al), cands);
     await sleep(700);
   }
   // dedupe (same video, or same song credited to several entries), then rank
@@ -833,21 +913,19 @@ async function buildSongs(st) {
 async function diagnostics() {
   const out = [
     'OP Memory diagnostics ' + new Date().toISOString(), 'UA: ' + navigator.userAgent,
-    `songs: ${songs.length}, progress: ${Object.keys(prog).length}, at filter/include: ${atF}/${atI}`,
+    `songs: ${songs.length}, progress: ${Object.keys(prog).length}, at batch: ${atBatch}`,
     `canPlay webm vp9: "${video.canPlayType('video/webm; codecs="vp9, opus"')}" webm: "${video.canPlayType('video/webm')}"`
   ];
   try { const d = await anilist('{Page(perPage:1){media(type:ANIME,sort:POPULARITY_DESC){id title{romaji}}}}', {}); out.push('AniList OK ' + JSON.stringify(d).slice(0, 120)); }
   catch (e) { out.push('AniList FAIL ' + e.message); }
-  for (let f = 0; f < AT_FILTERS.length; f++) {
-    try {
-      const r = await fetch(`https://api.animethemes.moe/anime?${AT_FILTERS[f]('16498,21')}&include=${AT_INCLUDES[0]}&page[size]=3`);
-      const t = await r.text(); out.push(`AT JSON:API f${f} ${r.status}: ${t.slice(0, 700)}`);
-    } catch (e) { out.push(`AT JSON:API f${f} FAIL ${e.message}`); }
-  }
   try {
-    const r = await fetch('https://graphql.animethemes.moe/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: '{__schema{queryType{fields{name args{name}}}}}' }) });
-    out.push('AT GraphQL ' + r.status + ': ' + (await r.text()).slice(0, 1500));
-  } catch (e) { out.push('AT GraphQL FAIL ' + e.message); }
+    AT = null; const plan = await atPlan();
+    out.push('AT query: ' + plan.query([16498]).slice(0, 900));
+    const d = await atPost(plan.query([16498, 21]));
+    out.push('AT result: ' + JSON.stringify(d).slice(0, 1200));
+    const n = plan.norm(d.a16498, 16498)[0];
+    out.push('AT normalized: ' + JSON.stringify(n && n.animethemes && n.animethemes.slice(0, 2)).slice(0, 700));
+  } catch (e) { out.push('AT FAIL ' + e.message); }
   if (songs[0]) out.push('sample song: ' + JSON.stringify(songs[0]).slice(0, 400));
   out.push('--- log ---', ...logLines.slice(-30));
   return out.join('\n');
