@@ -698,10 +698,13 @@ const AL_Q = `query($page:Int){Page(page:$page,perPage:50){pageInfo{hasNextPage}
     id title{romaji english} synonyms coverImage{large color} seasonYear season format
     studios(isMain:true){nodes{name}}}}}`;
 async function anilist(query, variables, st) {
-  for (let a = 0; a < 6; a++) {
+  for (let a = 0; a < 8; a++) {
     let r;
     try { r = await fetch(AL_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ query, variables }) }); }
-    catch (e) { if (a < 2) { await sleep(3000); continue; } throw new Error('AniList unreachable (' + e.message + ')'); }
+    catch (e) {
+      if (a < 5) { const w = [10, 20, 40, 60, 60][a]; log('AniList network error, retry in ' + w + 's: ' + e.message); st && st(`AniList isn't answering (probably rate limiting). Retrying in ${w}s…`); await sleep(w * 1000); continue; }
+      throw new Error('AniList unreachable (' + e.message + ')');
+    }
     if (r.status === 429) { const ra = +r.headers.get('Retry-After') || 60; st && st(`AniList asked to slow down. Waiting ${ra}s…`); await sleep(ra * 1000 + 500); continue; }
     const j = await r.json().catch(() => null);
     if (!r.ok || !j || j.errors) throw new Error('AniList ' + r.status + ': ' + JSON.stringify((j && j.errors) || '').slice(0, 300));
@@ -716,7 +719,10 @@ async function atPost(query, st) {
   for (let a = 0; a < 6; a++) {
     let r;
     try { r = await fetch(AT_GQL, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ query }) }); }
-    catch (e) { if (a < 2) { await sleep(3000); continue; } throw new Error('AnimeThemes unreachable (' + e.message + ')'); }
+    catch (e) {
+      if (a < 4) { const w = [10, 20, 40, 60][a]; log('AT network error, retry in ' + w + 's: ' + e.message); st && st(`AnimeThemes isn't answering. Retrying in ${w}s…`); await sleep(w * 1000); continue; }
+      throw new Error('AnimeThemes unreachable (' + e.message + ')');
+    }
     if (r.status === 429) { st && st('AnimeThemes asked to slow down. Waiting 60s…'); await sleep(61000); continue; }
     const j = await r.json().catch(() => null);
     if (!j) throw new Error('AnimeThemes ' + r.status + ': not JSON');
@@ -858,7 +864,7 @@ function pickVideo(entries) {
     for (const v of e.videos || []) {
       const link = v.link || (v.basename ? 'https://v.animethemes.moe/' + v.basename : null);
       if (!link) continue;
-      const sc = es + (v.overlap && v.overlap !== 'None' ? 2 : 0) + (v.lyrics ? 1 : 0) + (v.subbed ? 1 : 0) + (v.nc ? -0.3 : 0) + Math.abs((v.resolution || 720) - 720) / 400;
+      const sc = es + (v.overlap && String(v.overlap).toUpperCase() !== 'NONE' ? 2 : 0) + (v.lyrics ? 1 : 0) + (v.subbed ? 1 : 0) + (v.nc ? -0.3 : 0) + Math.abs((v.resolution || 720) - 720) / 400;
       if (sc < bs) { bs = sc; best = { link, key: v.basename || link.split('/').pop() }; }
     }
   }
@@ -887,22 +893,28 @@ function candidatesFrom(a, m, pr, out) {
     });
   }
 }
+let BC = null; // build progress kept between attempts, so a retry continues where it stopped
 async function buildSongs(st) {
-  const PAGES = 26, al = [];
-  for (let p = 1; p <= PAGES; p++) {
+  const PAGES = 26;
+  if (!BC || Date.now() - BC.at > 3600e3) BC = { at: Date.now(), al: [], page: 1, alDone: false, b: 0, cands: [] };
+  const al = BC.al;
+  while (!BC.alDone && BC.page <= PAGES) {
+    const p = BC.page;
     st(`Getting the most popular anime from AniList… ${p}/${PAGES}`, p / PAGES * 0.45);
     const d = await anilist(AL_Q, { page: p }, st);
-    al.push(...d.Page.media);
+    al.push(...d.Page.media); BC.page++;
     if (!d.Page.pageInfo.hasNextPage) break;
-    await sleep(2100);
+    await sleep(2500);
   }
+  BC.alDone = true;
   const rank = new Map(al.map((m, i) => [m.id, i + 1])), alById = new Map(al.map(m => [m.id, m]));
-  const cands = [], B = 50, nb = Math.ceil(al.length / B);
-  for (let b = 0; b < nb; b++) {
+  const cands = BC.cands, B = 50, nb = Math.ceil(al.length / B);
+  for (let b = BC.b; b < nb; b++) {
     st(`Getting openings from AnimeThemes… ${b + 1}/${nb}`, 0.45 + (b + 1) / nb * 0.55);
     const ids = al.slice(b * B, (b + 1) * B).map(m => m.id);
     const list = await themesFor(ids, st);
     for (const a of list) candidatesFrom(a, alById.get(a._al), rank.get(a._al), cands);
+    BC.b = b + 1;
     await sleep(700);
   }
   // dedupe (same video, or same song credited to several entries), then rank
@@ -925,6 +937,7 @@ async function buildSongs(st) {
   if (!LS.set(K.songs, songs)) throw new Error('Could not save the song list in this browser (storage blocked?)');
   LS.set(K.meta, meta);
   log(`built ${top.length} songs from ${al.length} anime, ${cands.length} candidates`);
+  BC = null;
   st(`Done: ${top.length} openings`, 1);
 }
 
