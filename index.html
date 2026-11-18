@@ -752,7 +752,24 @@ function sel(rel, inner) {
   const body = rel.wrap === 'edges' ? `edges{node{${inner}}}` : rel.wrap ? `${rel.wrap}{${inner}}` : inner;
   return `${rel.name}${rel.args}{${body}}`;
 }
-const scalars = (T, names) => names.filter(n => fieldOf(T, n)).join(' ');
+const LEAF = t => { const n = named(t); return n && (n.kind === 'SCALAR' || n.kind === 'ENUM'); };
+const scalars = (T, names) => names.filter(n => { const f = fieldOf(T, n); return f && LEAF(f.type); }).join(' ');
+/* A text field may be a plain string or an object such as SongTitle{original romaji …}. */
+async function textField(T, name) {
+  const f = fieldOf(T, name); if (!f) return null;
+  if (LEAF(f.type)) return { sel: name, read: v => pickText(v) };
+  const S = await getType(named(f.type).name);
+  const subs = (S.fields || []).filter(x => LEAF(x.type) && !(x.args || []).some(a => a.type && a.type.kind === 'NON_NULL')).map(x => x.name);
+  if (!subs.length) return null;
+  return { sel: `${name}{${subs.join(' ')}}`, read: v => pickText(v) };
+}
+function pickText(v) {
+  if (v == null) return '';
+  if (typeof v !== 'object') return String(v);
+  const pref = ['romaji', 'english', 'en', 'original', 'default', 'name', 'value', 'text', 'native'];
+  const vals = [...pref.filter(k => k in v).map(k => v[k]), ...Object.values(v)].filter(x => typeof x === 'string' && x.trim());
+  return vals.find(x => /^[\p{Script=Latin}\p{N}\p{P}\p{S}\p{Zs}]+$/u.test(x)) || vals[0] || '';
+}
 function items(v, rel) {
   if (v == null) return [];
   if (rel && rel.wrap === 'edges') return (v.edges || []).map(e => e && e.node).filter(Boolean);
@@ -776,10 +793,12 @@ async function atPlan() {
   const rTh = await relation(A, 'animethemes', 'themes'); if (!rTh) throw new Error('Anime type has no themes field');
   const Th = rTh.T;
   const rSong = await relation(Th, 'song');
-  let songSel = '', rArt = null, rPerf = null, perfSel = '';
+  let songSel = '', rArt = null, rPerf = null, perfSel = '', tTitle = null, tArt = null, artReaders = {};
   if (rSong) {
+    tTitle = await textField(rSong.T, 'title');
+    const titleSel = tTitle ? tTitle.sel : '';
     rArt = await relation(rSong.T, 'artists');
-    if (rArt) songSel = `title ${sel(rArt, scalars(rArt.T, ['name']))}`;
+    if (rArt) { tArt = await textField(rArt.T, 'name'); songSel = `${titleSel} ${tArt ? sel(rArt, tArt.sel) : ''}`; }
     else {
       rPerf = await relation(rSong.T, 'performances');
       if (rPerf) {
@@ -789,14 +808,13 @@ async function atPlan() {
           const AT2 = await getType(named(af.type).name);
           if (AT2.kind === 'UNION' || AT2.kind === 'INTERFACE') {
             const ok = [];
-            for (const p of AT2.possibleTypes || []) { try { if (fieldOf(await getType(p.name), 'name')) ok.push(p.name); } catch (e) {} }
-            artSel = `artist{__typename ${ok.map(n => `... on ${n}{name}`).join(' ')}}`;
-          }
-          else artSel = `artist{name}`;
+            for (const p of AT2.possibleTypes || []) { try { const tf = await textField(await getType(p.name), 'name'); if (tf) ok.push(`... on ${p.name}{${tf.sel}}`); } catch (e) {} }
+            artSel = `artist{__typename ${ok.join(' ')}}`;
+          } else { const tf = await textField(AT2, 'name'); artSel = tf ? `artist{${tf.sel}}` : ''; }
         }
         perfSel = `${scalars(P, ['as', 'alias'])} ${artSel}`;
-        songSel = `title ${sel(rPerf, perfSel)}`;
-      } else songSel = 'title';
+        songSel = `${titleSel} ${sel(rPerf, perfSel)}`;
+      } else songSel = titleSel;
     }
   }
   const rEnt = await relation(Th, 'animethemeentries', 'entries');
@@ -804,11 +822,12 @@ async function atPlan() {
   const vidSel = rVid ? sel(rVid, scalars(rVid.T, ['link', 'basename', 'resolution', 'nc', 'overlap', 'lyrics', 'subbed'])) : '';
   const entSel = rEnt ? sel(rEnt, `${scalars(rEnt.T, ['version', 'spoiler', 'nsfw'])} ${vidSel}`) : '';
   const thSel = sel(rTh, `${scalars(Th, ['type', 'sequence', 'slug'])} ${rSong ? `song{${songSel}}` : ''} ${entSel}`);
-  const aSel = `${scalars(A, ['name', 'slug', 'year'])} ${thSel}`;
+  const tName = await textField(A, 'name');
+  const aSel = `${tName ? tName.sel : ''} ${scalars(A, ['slug', 'year'])} ${thSel}`;
   AT = { query: ids => `{${ids.map(id => `a${id}:findAnimeByExternalSite(site:${siteLit},${idArg.name}:${idLit(id)}){${aSel}}`).join(' ')}}`,
     norm: (raw, alId) => {
-      const songOf = so => so ? { title: so.title, artists: rArt ? items(so[rArt.name], rArt).map(x => ({ name: x.name })) : rPerf ? items(so[rPerf.name], rPerf).map(p => ({ name: (p.artist && p.artist.name) || p.as || p.alias })) : [] } : null;
-      return items(raw).map(a => ({ _al: alId, name: a.name, slug: a.slug, year: a.year,
+      const songOf = so => so ? { title: pickText(so.title), artists: rArt ? items(so[rArt.name], rArt).map(x => ({ name: pickText(x.name) })) : rPerf ? items(so[rPerf.name], rPerf).map(p => ({ name: pickText(p.artist && p.artist.name) || pickText(p.as) || pickText(p.alias) })) : [] } : null;
+      return items(raw).map(a => ({ _al: alId, name: pickText(a.name), slug: a.slug, year: a.year,
         animethemes: items(a[rTh.name], rTh).map(t => ({ type: t.type, sequence: t.sequence, slug: t.slug, song: songOf(t.song),
           animethemeentries: rEnt ? items(t[rEnt.name], rEnt).map(e => ({ version: e.version, spoiler: e.spoiler, nsfw: e.nsfw, videos: rVid ? items(e[rVid.name], rVid) : [] })) : [] })) }));
     } };
@@ -823,7 +842,7 @@ async function themesFor(ids, st) {
     let d;
     try { d = await atPost(plan.query(chunk), st); }
     catch (e) {
-      if (e.gql && atBatch > 1) { atBatch = Math.max(1, Math.floor(atBatch / 2)); log('AT batch -> ' + atBatch); continue; }
+      if (e.gql && atBatch > 1 && !/sub selection|Cannot query|Unknown argument|Expected|must not have|not defined/i.test(e.message)) { atBatch = Math.max(1, Math.floor(atBatch / 2)); log('AT batch -> ' + atBatch); continue; }
       throw e;
     }
     for (const id of chunk) { const raw = d && d['a' + id]; if (raw) out.push(...plan.norm(raw, id).slice(0, 1)); }
