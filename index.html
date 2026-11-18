@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="OP Memory">
+<meta name="theme-color" content="#0f1117">
+<title>OP Memory</title>
+<style>
+:root{--bg:#0f1117;--card:#181b24;--card2:#222632;--line:#2b303d;--text:#eef0f5;--mut:#9aa1b2;--acc:#ff5d8f;--acc2:#7c9cff;--ok:#3ecf8e;--bad:#ff6464;--warn:#ffb74d}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text)}
+body{font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
+#app{max-width:640px;margin:0 auto;padding:calc(env(safe-area-inset-top) + 14px) 16px calc(env(safe-area-inset-bottom) + 92px)}
+body.session #app{padding-bottom:calc(env(safe-area-inset-bottom) + 24px)}
+#tabs{position:fixed;bottom:0;left:0;right:0;display:flex;background:rgba(15,17,23,.94);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom);z-index:5}
+#tabs button{flex:1;background:none;border:0;color:var(--mut);padding:9px 0 7px;font-size:11px;display:flex;flex-direction:column;align-items:center;gap:3px;font-family:inherit}
+#tabs button.on{color:var(--acc)}
+#tabs svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+body.session #tabs{display:none}
+h1{font-size:30px;margin:6px 0 16px;letter-spacing:-.5px}
+h2{font-size:17px;margin:22px 0 10px;color:var(--mut);font-weight:600}
+a{color:var(--acc2)}
+.card{background:var(--card);border-radius:16px;padding:16px;margin-bottom:12px}
+.btn{display:block;width:100%;border:0;border-radius:14px;padding:15px;font-size:17px;font-weight:600;background:var(--acc);color:#fff;margin-top:10px;font-family:inherit}
+.btn.sec{background:var(--card2);color:var(--text)}
+.btn.ghost{background:none;color:var(--acc2);padding:10px;font-weight:500;font-size:15px}
+.btn.danger{background:var(--card2);color:var(--bad)}
+.btn:disabled{opacity:.35}
+.row{display:flex;gap:10px}.row>*{flex:1;min-width:0}
+.mut{color:var(--mut)}.small{font-size:13px}.tiny{font-size:11px}
+.stats{display:flex;gap:10px;margin-bottom:12px}
+.stat{flex:1;background:var(--card);border-radius:14px;padding:12px 10px;text-align:center}
+.stat b{display:block;font-size:24px;letter-spacing:-.5px}
+.stat span{font-size:12px;color:var(--mut)}
+.bar{height:8px;background:var(--card2);border-radius:4px;overflow:hidden;margin:8px 0 4px}
+.bar>div{height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.x{background:var(--card2);border:0;color:var(--text);border-radius:10px;padding:8px 12px;font-size:15px;font-family:inherit;white-space:nowrap}
+.prog{height:6px;background:var(--card2);border-radius:3px;overflow:hidden;flex:1}
+.prog>div{height:100%;background:var(--acc);transition:width .3s}
+.vidwrap{position:relative;border-radius:14px;overflow:hidden;background:#000;aspect-ratio:16/9;margin-bottom:12px}
+.vidwrap video{width:100%;height:100%;display:block;object-fit:contain;background:#000}
+.vidwrap .poster{display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover;filter:blur(18px) brightness(.55);transform:scale(1.15);pointer-events:none}
+.vidwrap .mask,.vidwrap .verr,.vidwrap .tap{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:16px}
+.vidwrap .mask{background:radial-gradient(circle at 50% 40%,#2a1730,#0b0c10)}
+.vidwrap.masked video{opacity:0}
+.vidwrap.masked .mask{display:flex}
+.vidwrap.audio:not(.masked) video{opacity:0}
+.vidwrap.audio:not(.masked) .poster{display:block}
+.vidwrap .verr{background:rgba(0,0,0,.85);font-size:14px;z-index:3}
+.vidwrap.err .verr{display:flex}
+.vidwrap .tap{background:rgba(0,0,0,.55);font-weight:600;z-index:2}
+.vidwrap.needtap .tap{display:flex}
+.eq{display:flex;gap:5px;align-items:flex-end;height:40px}
+.eq i{display:block;width:7px;background:var(--acc);border-radius:3px;animation:eq 1s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:.15s}.eq i:nth-child(3){animation-delay:.3s}.eq i:nth-child(4){animation-delay:.45s}.eq i:nth-child(5){animation-delay:.6s}
+@keyframes eq{0%,100%{height:8px}50%{height:40px}}
+.q{font-size:19px;font-weight:700;margin:4px 0 6px}
+.opt{display:block;width:100%;text-align:left;background:var(--card2);border:2px solid transparent;color:var(--text);border-radius:12px;padding:13px 14px;font-size:16px;margin-top:8px;font-family:inherit}
+.opt.right{border-color:var(--ok);background:rgba(62,207,142,.14)}
+.opt.wrong{border-color:var(--bad);background:rgba(255,100,100,.14)}
+.opt:disabled{color:var(--text);opacity:1}
+.result{font-weight:700;font-size:17px;margin:12px 0 10px}
+.result.ok{color:var(--ok)}.result.bad{color:var(--bad)}
+.info .head{display:flex;gap:12px;align-items:flex-start}
+.info .head img{width:62px;height:88px;object-fit:cover;border-radius:8px;background:var(--card2);flex:none}
+.info .anime{font-size:20px;font-weight:700;line-height:1.2}
+.info .meta{font-size:13px;color:var(--mut);margin-top:4px}
+.info .song{font-size:17px;font-weight:600;margin-top:12px}
+.info .artist{color:var(--acc2);margin-top:2px}
+.conn{font-size:14px}
+.conn div{padding:5px 0;border-top:1px solid var(--line)}
+.conn div:first-of-type{border-top:0}
+.conn b{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:2px}
+.list .item{display:flex;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.list img{width:42px;height:60px;object-fit:cover;border-radius:6px;background:var(--card2);flex:none}
+.list .t{flex:1;min-width:0}
+.list .t div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;background:var(--card2);color:var(--mut);white-space:nowrap}
+.chip.learn{color:var(--acc2)}.chip.mature{color:var(--ok)}.chip.hard{color:var(--warn)}
+.chips{display:flex;gap:8px;overflow-x:auto;margin:10px 0 4px;padding-bottom:4px}
+.chips button{border:1px solid var(--line);background:none;color:var(--mut);border-radius:99px;padding:6px 13px;font-size:14px;white-space:nowrap;font-family:inherit}
+.chips button.on{background:var(--text);color:var(--bg);border-color:var(--text)}
+input[type=text],input[type=search],textarea,select{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px;font-size:16px;font-family:inherit;-webkit-appearance:none;appearance:none}
+textarea{min-height:110px;font-size:13px;font-family:ui-monospace,Menlo,monospace}
+.sug button{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line);color:var(--text);padding:11px 4px;font-size:15px;font-family:inherit}
+.set{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+.set:last-child{border-bottom:0}
+.set select{width:auto;padding:8px 30px 8px 12px;background:var(--card2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%239aa1b2' fill='none' stroke-width='2'/%3E%3C/svg%3E") no-repeat right 10px center}
+.sw{position:relative;width:50px;height:30px;flex:none}
+.sw input{opacity:0;width:0;height:0;position:absolute}
+.sw span{position:absolute;inset:0;background:var(--card2);border-radius:99px;transition:.2s}
+.sw span:before{content:"";position:absolute;width:24px;height:24px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+.sw input:checked+span{background:var(--ok)}
+.sw input:checked+span:before{transform:translateX(20px)}
+.bars{display:flex;align-items:flex-end;gap:6px;height:90px;margin-top:8px}
+.bars div{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;font-size:11px;color:var(--mut)}
+.bars i{display:block;width:100%;background:var(--acc2);border-radius:4px 4px 0 0;min-height:2px;margin:3px 0}
+#sheet{position:fixed;inset:0;z-index:10;display:none}
+#sheet.open{display:block}
+#sheet .bg{position:absolute;inset:0;background:rgba(0,0,0,.6)}
+#sheet .body{position:absolute;left:0;right:0;bottom:0;max-height:92%;overflow-y:auto;background:var(--bg);border-radius:20px 20px 0 0;padding:16px 16px calc(env(safe-area-inset-bottom) + 16px);max-width:640px;margin:0 auto;-webkit-overflow-scrolling:touch}
+#toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 96px);transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:20;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90%;text-align:center}
+#toast.show{opacity:1}
+.loader{height:8px;background:var(--card2);border-radius:4px;overflow:hidden;margin:14px 0 8px}
+.loader div{height:100%;background:var(--acc);width:0;transition:width .3s}
+.err{color:var(--bad);font-size:14px;white-space:pre-wrap}
+ul.tips{padding-left:20px;margin:8px 0;color:var(--mut);font-size:14px}
+ul.tips li{margin:4px 0}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<nav id="tabs">
+  <button data-v="today"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>Today</button>
+  <button data-v="listen"><svg viewBox="0 0 24 24"><path d="M3 14v-2a9 9 0 0 1 18 0v2"/><rect x="2" y="14" width="5" height="7" rx="2"/><rect x="17" y="14" width="5" height="7" rx="2"/></svg>Listen</button>
+  <button data-v="library"><svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>Library</button>
+  <button data-v="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
+</nav>
+<div id="sheet"></div>
+<div id="toast"></div>
+<script>
+'use strict';
+/* ============ helpers ============ */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const app = $('#app');
+let toastT;
+function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600); }
+
+/* ============ storage ============ */
+const K = { songs: 'opm.songs.v1', meta: 'opm.meta.v1', prog: 'opm.progress.v1', set: 'opm.settings.v1', daily: 'opm.daily.v1', log: 'opm.log.v1' };
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { log('storage error: ' + e.message); toast('Could not save (storage blocked or full)'); return false; } }
+};
+let songs = LS.get(K.songs, []);
+let meta = LS.get(K.meta, null);
+let prog = LS.get(K.prog, {});
+let settings = Object.assign({ names: 'en', newPerDay: 10, lesson: 10, randomStart: true, typed: true, video: true }, LS.get(K.set, {}));
+let daily = LS.get(K.daily, { day: '', n: 0, r: 0 });
+let byKey = new Map();
+function reindex() { byKey = new Map(songs.map(s => [s.k, s])); }
+reindex();
+const saveProg = () => LS.set(K.prog, prog);
+const saveSet = () => LS.set(K.set, settings);
+const saveDaily = () => LS.set(K.daily, daily);
+const logLines = LS.get(K.log, []);
+function log(m) {
+  const line = new Date().toISOString().slice(5, 19).replace('T', ' ') + ' ' + m;
+  logLines.push(line); while (logLines.length > 80) logLines.shift();
+  try { localStorage.setItem(K.log, JSON.stringify(logLines)); } catch (e) {}
+  console.log(line);
+}
+try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+
+/* ============ days (day rolls over at 4am) ============ */
+function dayStart(off = 0) { const d = new Date(); if (d.getHours() < 4) d.setDate(d.getDate() - 1); d.setHours(4, 0, 0, 0); d.setDate(d.getDate() + off); return d.getTime(); }
+function dayKey() { const d = new Date(dayStart(0)); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); }
+function today() { if (daily.day !== dayKey()) { daily = { day: dayKey(), n: 0, r: 0 }; saveDaily(); } return daily; }
+
+/* ============ names & matching ============ */
+function nm(s) { return settings.names === 'en' ? (s.en || s.ro) : (s.ro || s.en); }
+function altName(s) { const a = settings.names === 'en' ? s.ro : s.en; return a && a !== nm(s) ? a : ''; }
+const norm = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}]+/gu, '');
+function franchise(t) {
+  let x = String(t || '').toLowerCase().split(/[:：]/)[0];
+  x = x.replace(/\b(season|part|cour|the final|final season|movie|film|\d+(st|nd|rd|th))\b.*$/, '');
+  x = x.replace(/\s+(ii|iii|iv|v|\d+)\s*$/, '');
+  return norm(x) || norm(t);
+}
+function lev(a, b) {
+  if (a === b) return 0; if (!a.length) return b.length; if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+function checkTyped(s, input) {
+  const n = norm(input); if (!n) return 0;
+  const names = [s.ro, s.en, ...(s.syn || [])].filter(Boolean);
+  for (const x of names) { const m = norm(x); if (m === n) return 2; if (m.length > 5 && 1 - lev(m, n) / Math.max(m.length, n.length) >= 0.85) return 2; }
+  if ((s.fk || []).includes(franchise(input))) return 1; // right franchise, different season
+  return 0;
+}
+
+/* ============ spaced repetition ============ */
+const MATURE = 21;
+function isDue(c) { return !!c && c.due <= Date.now(); }
+function dueList() { return songs.filter(s => isDue(prog[s.k])).sort((a, b) => prog[a.k].due - prog[b.k].due); }
+function newList() { return songs.filter(s => !prog[s.k]).sort((a, b) => a.r - b.r); }
+function learnedList() { return songs.filter(s => prog[s.k]); }
+function schedule(c, ok, fast, detail) {
+  c.reps = (c.reps || 0) + 1; c.last = Date.now(); c.ease = c.ease || 2.5;
+  if (ok) {
+    let ivl = c.ivl < 1 ? 1 : c.ivl * c.ease * (fast ? 1.15 : 1);
+    if (c.ivl >= 1 && ivl < c.ivl + 1) ivl = c.ivl + 1;
+    c.ivl = Math.max(1, Math.min(365, Math.round(ivl * (0.95 + Math.random() * 0.1))));
+    if (fast) c.ease = Math.min(3, c.ease + 0.05);
+  } else if (detail) {
+    c.dm = (c.dm || 0) + 1; c.ivl = Math.max(1, Math.round(c.ivl * 0.6));
+  } else {
+    c.lap = (c.lap || 0) + 1; c.ease = Math.max(1.3, c.ease - 0.2); c.ivl = 1;
+  }
+  c.due = dayStart(c.ivl);
+}
+function status(s) {
+  const c = prog[s.k]; if (!c) return ['new', 'New'];
+  if ((c.lap || 0) >= 3) return ['hard', 'Struggling'];
+  if (c.ivl >= MATURE) return ['mature', 'Known'];
+  return ['learn', 'Learning'];
+}
+
+/* ============ player (one shared <video>, so iOS keeps it unlocked) ============ */
+const video = document.createElement('video');
+video.setAttribute('playsinline', ''); video.setAttribute('webkit-playsinline', ''); video.preload = 'auto';
+let playStartedAt = 0, onEnded = null, curWrap = null;
+video.addEventListener('playing', () => { if (!playStartedAt) playStartedAt = Date.now(); if (curWrap) curWrap.classList.remove('needtap'); });
+video.addEventListener('ended', () => { if (onEnded) onEnded(); });
+video.addEventListener('error', () => {
+  log('video error ' + (video.error && video.error.code) + ' ' + video.currentSrc);
+  if (curWrap) curWrap.classList.add('err');
+});
+function mountPlayer(container, s, { start = 0, masked = false } = {}) {
+  container.innerHTML = `<div class="vidwrap ${masked ? 'masked' : ''} ${settings.video ? '' : 'audio'}">
+    <img class="poster" src="${esc(s.cov)}" alt="">
+    <div class="mask"><div class="eq"><i></i><i></i><i></i><i></i><i></i></div><div class="small mut">Listen…</div></div>
+    <div class="tap">▶ Tap to play</div>
+    <div class="verr">This video wouldn't play.<a href="${esc(s.page || 'https://animethemes.moe')}" target="_blank" rel="noopener">Open it on AnimeThemes</a></div>
+  </div>`;
+  const w = container.firstElementChild;
+  w.insertBefore(video, w.firstChild);
+  curWrap = w; playStartedAt = 0;
+  video.controls = !masked;
+  const src = s.v + (start > 0 ? '#t=' + start : '');
+  if (video.getAttribute('src') !== src) video.setAttribute('src', src);
+  else { try { video.currentTime = start; } catch (e) {} }
+  tryPlay(w);
+  w.querySelector('.tap').onclick = () => tryPlay(w);
+  return w;
+}
+function tryPlay(w) {
+  try {
+    const p = video.play();
+    if (p && p.catch) p.catch(e => { if (e.name === 'NotAllowedError') w.classList.add('needtap'); else log('play failed: ' + e.name + ' ' + e.message); });
+  } catch (e) { w.classList.add('needtap'); }
+}
+function reveal(w) { w.classList.remove('masked'); video.controls = true; }
+function stopPlayer() { onEnded = null; try { video.pause(); } catch (e) {} }
+
+/* ============ shared UI blocks ============ */
+function seasonText(s) { const se = s.se ? s.se[0] + s.se.slice(1).toLowerCase() + ' ' : ''; return s.yr ? se + s.yr : ''; }
+function infoBlock(s) {
+  const a = altName(s);
+  const meta = [s.sl, seasonText(s), s.st].filter(Boolean).join(' · ');
+  return `<div class="card info"><div class="head"><img src="${esc(s.cov)}" alt="" onerror="this.style.visibility='hidden'"><div>
+    <div class="anime">${esc(nm(s))}</div>${a ? `<div class="small mut">${esc(a)}</div>` : ''}
+    <div class="meta">${esc(meta)}</div></div></div>
+    <div class="song">♪ ${esc(s.t)}</div><div class="artist">${esc(s.ar)}</div></div>`;
+}
+function songLine(x) { const st = prog[x.k] ? '' : ' <span class="chip">new</span>'; return `${esc(x.sl)} “${esc(x.t)}” — ${esc(x.ar)}${st}`; }
+function connections(s) {
+  const out = [];
+  const sameA = songs.filter(x => x.aid === s.aid && x.k !== s.k).sort((a, b) => a.sq - b.sq);
+  if (sameA.length) out.push(`<div><b>Other openings of this anime</b>${sameA.slice(0, 5).map(songLine).join('<br>')}</div>`);
+  const sameF = songs.filter(x => x.aid !== s.aid && x.fk.some(f => s.fk.includes(f))).sort((a, b) => (a.yr || 0) - (b.yr || 0));
+  if (sameF.length) out.push(`<div><b>Same franchise</b>${sameF.slice(0, 4).map(x => `${esc(nm(x))}: ${songLine(x)}`).join('<br>')}</div>`);
+  const arts = s.arl || [];
+  if (arts.length) {
+    const sameArt = songs.filter(x => x.k !== s.k && x.aid !== s.aid && (x.arl || []).some(a => arts.includes(a)))
+      .sort((a, b) => (prog[b.k] ? 1 : 0) - (prog[a.k] ? 1 : 0) || a.r - b.r);
+    if (sameArt.length) out.push(`<div><b>Same artist also sang</b>${sameArt.slice(0, 4).map(x => `“${esc(x.t)}” — ${esc(nm(x))} ${esc(x.sl)}${prog[x.k] ? '' : ' <span class="chip">new</span>'}`).join('<br>')}</div>`);
+  }
+  return out.length ? `<div class="card conn">${out.join('')}</div>` : '';
+}
+function topbar(label, pct) {
+  return `<div class="topbar"><button class="x" id="quit">✕</button><div class="prog"><div style="width:${Math.max(0, Math.min(100, pct))}%"></div></div><div class="small mut">${esc(label)}</div></div>`;
+}
+
+/* ============ questions ============ */
+const VAL = { anime: s => nm(s), title: s => s.t, artist: s => s.ar };
+const QTEXT = { anime: 'Which anime is this from?', title: 'What is this song called?', artist: 'Who performs this?' };
+function distractors(s, variant, pool) {
+  const val = VAL[variant];
+  const bad = x => x.k === s.k || (variant === 'anime' ? (x.aid === s.aid || x.fk.some(f => s.fk.includes(f))) : false);
+  const seen = new Set([norm(val(s))]); const out = [];
+  const take = (arr, n) => { let c = 0; for (const x of shuffle(arr)) { if (out.length >= 3 || c >= n) break; if (bad(x)) continue; const v = norm(val(x)); if (!v || seen.has(v) || /unknown/.test(v)) continue; seen.add(v); out.push(val(x)); c++; } };
+  if (pool) take(pool, 2);
+  const similar = songs.filter(x => (x.yr && s.yr && Math.abs(x.yr - s.yr) <= 2) || (x.st && x.st === s.st));
+  take(similar.filter(x => prog[x.k]), 2);
+  take(similar, 3);
+  take(songs.filter(x => Math.abs(x.r - s.r) < 300), 3);
+  take(songs, 3);
+  if (out.length < 3 && variant === 'anime') { // tiny or odd lists: allow same-franchise picks rather than show too few options
+    for (const x of shuffle(songs)) { if (out.length >= 3) break; if (x.aid === s.aid) continue; const v = norm(val(x)); if (!v || seen.has(v)) continue; seen.add(v); out.push(val(x)); }
+  }
+  return out;
+}
+let allNames = null;
+function nameIndex() {
+  if (allNames) return allNames;
+  const m = new Map();
+  for (const s of songs) for (const n of [s.en, s.ro]) if (n && !m.has(norm(n))) m.set(norm(n), n);
+  return allNames = Array.from(m.values()).sort((a, b) => a.localeCompare(b));
+}
+/* Renders one question. onGrade(ok, fast) is called once; onNext() when the user moves on. */
+function renderQuestion(s, variant, typed, onGrade, onNext, opt = {}) {
+  app.innerHTML = topbar(opt.label || '', opt.progress || 0) + `<div id="pl"></div>
+    <div class="q">${QTEXT[variant]}</div><div id="ans"></div><div id="after"></div>`;
+  $('#quit').onclick = opt.onQuit;
+  const w = mountPlayer($('#pl'), s, { start: opt.start || 0, masked: true });
+  let answered = false;
+  const correct = VAL[variant](s);
+  const finish = (ok, note) => {
+    if (answered) return; answered = true;
+    const ms = playStartedAt ? Date.now() - playStartedAt : 1e9;
+    onGrade(ok, ok && ms < 6000);
+    reveal(w);
+    $('#after').innerHTML = `<div class="result ${ok ? 'ok' : 'bad'}">${ok ? (ms < 6000 ? '✓ Correct, and quick' : '✓ Correct') : '✗ ' + (note || 'Not this time')}</div>
+      ${infoBlock(s)}${connections(s)}<button class="btn" id="next">Next</button>`;
+    $('#next').onclick = onNext;
+    $('#after').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  if (typed) {
+    $('#ans').innerHTML = `<div class="small mut" style="margin-bottom:8px">You know this one well, so type it this time.</div>
+      <input type="text" id="ti" placeholder="Anime name" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <div class="sug" id="sug"></div>
+      <div class="row"><button class="btn sec" id="idk">Don't know</button><button class="btn" id="sub">Check</button></div>`;
+    const ti = $('#ti'), sug = $('#sug');
+    ti.oninput = () => {
+      const q = norm(ti.value); if (q.length < 2) { sug.innerHTML = ''; return; }
+      const hits = nameIndex().filter(n => norm(n).includes(q)).slice(0, 6);
+      sug.innerHTML = hits.map(h => `<button data-n="${esc(h)}">${esc(h)}</button>`).join('');
+      $$('button', sug).forEach(b => b.onclick = () => { ti.value = b.dataset.n; sug.innerHTML = ''; });
+    };
+    const submit = () => {
+      const r = checkTyped(s, ti.value);
+      ti.disabled = true; sug.innerHTML = '';
+      $('#sub').disabled = true; $('#idk').disabled = true;
+      finish(r > 0, r ? '' : `It was ${correct}`);
+      if (r === 1) $('.result').insertAdjacentHTML('beforeend', '<div class="small mut">You named the right franchise. This one is the season shown below.</div>');
+    };
+    $('#sub').onclick = submit;
+    ti.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } };
+    $('#idk').onclick = () => { ti.disabled = true; finish(false, `It was ${correct}`); };
+    try { ti.focus(); } catch (e) {}
+  } else {
+    const opts = shuffle([correct, ...distractors(s, variant, opt.pool)]);
+    $('#ans').innerHTML = opts.map((o, i) => `<button class="opt" data-i="${i}">${esc(o)}</button>`).join('') +
+      `<button class="btn ghost" id="idk">I don't know</button>`;
+    const btns = $$('.opt');
+    const lock = picked => {
+      btns.forEach(b => { b.disabled = true; if (opts[+b.dataset.i] === correct) b.classList.add('right'); });
+      if (picked && opts[+picked.dataset.i] !== correct) picked.classList.add('wrong');
+      $('#idk').remove();
+    };
+    btns.forEach(b => b.onclick = () => { const ok = opts[+b.dataset.i] === correct; lock(b); finish(ok, ok ? '' : `It was ${correct}`); });
+    $('#idk').onclick = () => { lock(null); finish(false, `It was ${correct}`); };
+  }
+}
+
+/* ============ navigation ============ */
+let view = 'today';
+function go(v) {
+  stopPlayer();
+  view = v;
+  document.body.classList.toggle('session', v === 'learn' || v === 'review');
+  render();
+  window.scrollTo(0, 0);
+}
+function render() {
+  $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.v === view));
+  if (!songs.length && view !== 'settings') return renderSetup();
+  ({ today: renderToday, learn: renderLearn, review: renderReview, listen: renderListen, library: renderLibrary, settings: renderSettings })[view]();
+}
+$$('#tabs button').forEach(b => b.onclick = () => go(b.dataset.v));
+
+/* ============ Today ============ */
+function renderToday() {
+  const t = today();
+  const due = dueList().length, fresh = newList().length;
+  const learned = learnedList().length, known = learnedList().filter(s => prog[s.k].ivl >= MATURE).length;
+  const left = Math.max(0, settings.newPerDay - t.n);
+  const n = Math.min(settings.lesson, fresh, left || settings.lesson);
+  app.innerHTML = `<h1>Today</h1>
+    <div class="stats"><div class="stat"><b>${due}</b><span>due</span></div><div class="stat"><b>${learned}</b><span>learned</span></div><div class="stat"><b>${known}</b><span>known well</span></div></div>
+    <div class="card">
+      <div class="small mut">${learned} of ${songs.length} openings learned</div>
+      <div class="bar"><div style="width:${songs.length ? learned / songs.length * 100 : 0}%"></div></div>
+      <button class="btn" id="rev" ${due ? '' : 'disabled'}>${due ? `Review · ${due} due` : 'No reviews due'}</button>
+      ${fresh ? (left > 0
+        ? `<button class="btn ${due ? 'sec' : ''}" id="learn">Learn ${n} new openings</button><div class="tiny mut" style="margin-top:6px;text-align:center">${t.n} of ${settings.newPerDay} new learned today</div>`
+        : `<button class="btn sec" id="learn">Daily limit reached · learn more anyway</button>`)
+        : '<div class="small mut" style="margin-top:10px">You have started every song in the list.</div>'}
+    </div>
+    ${t.r ? `<div class="small mut" style="text-align:center">${t.r} reviews done today</div>` : ''}
+    ${learned === 0 ? `<h2>How this works</h2><ul class="tips">
+      <li><b>Learn</b>: watch each new opening with its anime, song title and artist, then a quick check on that batch.</li>
+      <li><b>Review</b>: songs come back right before you'd forget them. A miss brings a song back sooner; a quick right answer pushes it further out.</li>
+      <li><b>Listen</b>: play your learned songs back to back, with their info on screen.</li>
+      <li>Your progress stays on this phone. Use Settings → Backup now and then.</li></ul>` : ''}`;
+  if ($('#rev')) $('#rev').onclick = startReview;
+  if ($('#learn')) $('#learn').onclick = startLesson;
+}
+
+/* ============ Learn (new songs) ============ */
+let L = null;
+function startLesson() {
+  const items = newList().slice(0, settings.lesson);
+  if (!items.length) return;
+  L = { items, i: 0, phase: 'intro', queue: [], done: 0, quitArm: false };
+  go('learn');
+}
+function quitLesson() {
+  if (L && L.phase !== 'done' && !L.quitArm) { L.quitArm = true; $('#quit').textContent = 'Quit? Tap again'; toast('This lesson won’t be saved'); return; }
+  L = null; go('today');
+}
+function renderLearn() {
+  if (!L) return go('today');
+  if (L.phase === 'intro') {
+    const s = L.items[L.i], last = L.i === L.items.length - 1;
+    app.innerHTML = topbar(`New ${L.i + 1}/${L.items.length}`, L.i / L.items.length * 50) + `<div id="pl"></div>${infoBlock(s)}${connections(s)}
+      <div class="small mut" style="margin:4px 2px 0">Let the opening play. Look at the title and artist while you listen.</div>
+      <div class="row"><button class="btn sec" id="prev" ${L.i ? '' : 'disabled'}>Back</button><button class="btn sec" id="rep">Replay</button></div>
+      <button class="btn" id="nx">${last ? 'Start the check' : 'Next song'}</button>`;
+    $('#quit').onclick = quitLesson;
+    mountPlayer($('#pl'), s);
+    $('#rep').onclick = () => { try { video.currentTime = 0; } catch (e) {} tryPlay(curWrap); };
+    $('#prev').onclick = () => { L.i--; L.quitArm = false; renderLearn(); window.scrollTo(0, 0); };
+    $('#nx').onclick = () => {
+      L.quitArm = false;
+      if (last) { L.phase = 'check'; L.queue = shuffle(L.items.map(x => x.k)); L.total = L.queue.length; }
+      else L.i++;
+      renderLearn(); window.scrollTo(0, 0);
+    };
+  } else if (L.phase === 'check') {
+    if (!L.queue.length) return finishLesson();
+    const s = byKey.get(L.queue[0]);
+    renderQuestion(s, 'anime', false, ok => {
+      L.queue.shift();
+      if (ok) L.done++; else L.queue.splice(Math.min(2, L.queue.length), 0, s.k);
+    }, () => { L.quitArm = false; renderLearn(); window.scrollTo(0, 0); },
+    { label: `Check ${Math.min(L.done + 1, L.total)}/${L.total}`, progress: 50 + L.done / L.total * 50, pool: L.items, onQuit: quitLesson });
+  } else {
+    const more = newList().length;
+    app.innerHTML = `<h1>Lesson done</h1><div class="card">You added <b>${L.items.length}</b> openings. Their first review is tomorrow.
+      <div class="small mut" style="margin-top:8px">Listening to them a couple more times today makes them stick better.</div></div>
+      <button class="btn" id="again">Listen to this batch</button>
+      ${more ? '<button class="btn sec" id="another">Another lesson</button>' : ''}
+      <button class="btn sec" id="done">Done</button>`;
+    $('#again').onclick = () => { LI = { list: L.items.map(x => x.k), i: 0, name: 'This lesson' }; L = null; go('listen'); };
+    if ($('#another')) $('#another').onclick = startLesson;
+    $('#done').onclick = () => { L = null; go('today'); };
+  }
+}
+function finishLesson() {
+  const t = today(), now = Date.now();
+  for (const s of L.items) prog[s.k] = { ivl: 1, ease: 2.5, due: dayStart(1), reps: 1, lap: 0, dm: 0, last: now, intro: now };
+  t.n += L.items.length; saveDaily(); saveProg();
+  L.phase = 'done'; renderLearn();
+}
+
+/* ============ Review ============ */
+let R = null;
+function startReview() {
+  const d = dueList(); if (!d.length) return;
+  const take = d.slice(0, 40);
+  R = { queue: take.map(s => s.k), retry: new Set(), done: 0, ok: 0, total: take.length };
+  go('review');
+}
+function renderReview() {
+  if (!R) return go('today');
+  if (!R.queue.length) {
+    const more = dueList().length;
+    app.innerHTML = `<h1>Reviews done</h1><div class="stats"><div class="stat"><b>${R.done}</b><span>reviewed</span></div><div class="stat"><b>${R.done ? Math.round(R.ok / R.done * 100) : 0}%</b><span>right first time</span></div></div>
+      ${more ? `<button class="btn" id="more">Keep going · ${more} due</button>` : ''}<button class="btn sec" id="done">Done</button>`;
+    if ($('#more')) $('#more').onclick = startReview;
+    $('#done').onclick = () => { R = null; go('today'); };
+    return;
+  }
+  const s = byKey.get(R.queue[0]); const c = prog[s.k];
+  if (!s || !c) { R.queue.shift(); return renderReview(); }
+  const retry = R.retry.has(s.k);
+  let variant = 'anime';
+  if (!retry && c.reps >= 2 && c.ivl >= 3) { const r = Math.random(); if (r < 0.18) variant = 'title'; else if (r < 0.33) variant = 'artist'; }
+  const typed = variant === 'anime' && settings.typed && !retry && c.ivl >= 14;
+  const start = settings.randomStart && !retry && c.ivl >= MATURE ? 15 + Math.floor(Math.random() * 45) : 0;
+  renderQuestion(s, variant, typed, (ok, fast) => {
+    R.queue.shift();
+    if (retry) { if (!ok) R.queue.splice(Math.min(3, R.queue.length), 0, s.k); else R.retry.delete(s.k); return; }
+    schedule(c, ok, fast, variant !== 'anime'); saveProg();
+    const t = today(); t.r++; saveDaily();
+    R.done++; if (ok) R.ok++;
+    if (!ok && variant === 'anime') { R.retry.add(s.k); R.queue.splice(Math.min(4, R.queue.length), 0, s.k); }
+  }, () => { renderReview(); window.scrollTo(0, 0); }, {
+    label: retry ? 'Again' : `${R.done + 1}/${R.total}`, progress: R.done / R.total * 100, start,
+    onQuit: () => { R = null; go('today'); }
+  });
+}
+
+/* ============ Listen ============ */
+let LI = null;
+function renderListen() {
+  if (!LI) {
+    const learned = learnedList();
+    const hard = learned.filter(s => (prog[s.k].lap || 0) >= 2 || (prog[s.k].dm || 0) >= 2);
+    const recent = learned.filter(s => Date.now() - (prog[s.k].intro || 0) < 3 * 864e5);
+    const next = newList().slice(0, settings.lesson);
+    app.innerHTML = `<h1>Listen</h1><div class="small mut" style="margin-bottom:6px">Songs play back to back with their info on screen. Fine for walks or chores.</div>
+      <button class="btn" id="l1" ${learned.length ? '' : 'disabled'}>All learned songs, shuffled (${learned.length})</button>
+      <button class="btn sec" id="l2" ${recent.length ? '' : 'disabled'}>Learned in the last 3 days (${recent.length})</button>
+      <button class="btn sec" id="l3" ${hard.length ? '' : 'disabled'}>Ones you keep missing (${hard.length})</button>
+      <button class="btn sec" id="l4" ${next.length ? '' : 'disabled'}>Preview your next lesson (${next.length})</button>`;
+    const set = (list, name) => { LI = { list: list.map(s => s.k), i: 0, name }; renderListen(); };
+    $('#l1').onclick = () => set(shuffle(learned), 'All learned');
+    $('#l2').onclick = () => set(shuffle(recent), 'Recent');
+    $('#l3').onclick = () => set(shuffle(hard), 'Keep missing');
+    $('#l4').onclick = () => set(next, 'Next lesson');
+    return;
+  }
+  const s = byKey.get(LI.list[LI.i]);
+  if (!s) { LI = null; return renderListen(); }
+  app.innerHTML = `<div class="topbar"><button class="x" id="back">‹ Back</button><div class="small mut" style="flex:1;text-align:right">${esc(LI.name)} · ${LI.i + 1}/${LI.list.length}</div></div>
+    <div id="pl"></div>
+    <div class="row" style="margin-bottom:12px"><button class="btn sec" id="pv" ${LI.i ? '' : 'disabled'}>‹ Prev</button><button class="btn sec" id="vt">${settings.video ? 'Audio only' : 'Show video'}</button><button class="btn sec" id="nx" ${LI.i < LI.list.length - 1 ? '' : 'disabled'}>Next ›</button></div>
+    ${infoBlock(s)}${connections(s)}`;
+  mountPlayer($('#pl'), s);
+  const step = d => { LI.i += d; renderListen(); window.scrollTo(0, 0); };
+  onEnded = () => { if (LI && LI.i < LI.list.length - 1) step(1); };
+  $('#back').onclick = () => { stopPlayer(); LI = null; renderListen(); };
+  $('#pv').onclick = () => step(-1);
+  $('#nx').onclick = () => step(1);
+  $('#vt').onclick = () => { settings.video = !settings.video; saveSet(); curWrap.classList.toggle('audio', !settings.video); $('#vt').textContent = settings.video ? 'Audio only' : 'Show video'; };
+}
+
+/* ============ Library ============ */
+let libFilter = 'all', libQuery = '', libShow = 120;
+function renderLibrary() {
+  const learned = learnedList();
+  const forecast = [];
+  for (let d = 0; d < 7; d++) {
+    const a = d === 0 ? -Infinity : dayStart(d), b = dayStart(d + 1);
+    forecast.push(learned.filter(s => prog[s.k].due >= a && prog[s.k].due < b).length);
+  }
+  const fmax = Math.max(1, ...forecast);
+  const dn = ['Today', 'Tmrw'];
+  const lbl = d => dn[d] || new Date(dayStart(d)).toLocaleDateString(undefined, { weekday: 'short' });
+  app.innerHTML = `<h1>Library</h1>
+    <div class="card"><div class="small mut">Reviews coming up</div>
+      <div class="bars">${forecast.map((n, d) => `<div>${n}<i style="height:${n / fmax * 60}px"></i>${lbl(d)}</div>`).join('')}</div></div>
+    <input type="search" id="q" placeholder="Search anime, song or artist" value="${esc(libQuery)}">
+    <div class="chips">${[['all', 'All'], ['learn', 'Learning'], ['mature', 'Known'], ['hard', 'Struggling'], ['new', 'New']].map(([k, l]) => `<button data-f="${k}" class="${libFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="list" id="list"></div>`;
+  const draw = () => {
+    const q = norm(libQuery);
+    let list = songs.filter(s => libFilter === 'all' || status(s)[0] === libFilter);
+    if (q) list = list.filter(s => [s.ro, s.en, s.t, s.ar, ...(s.syn || [])].some(x => norm(x).includes(q)));
+    list.sort((a, b) => a.r - b.r);
+    $('#list').innerHTML = `<div class="tiny mut" style="margin:6px 0">${list.length} songs</div>` + list.slice(0, libShow).map(s => {
+      const [k, l] = status(s);
+      return `<div class="item" data-k="${esc(s.k)}"><img loading="lazy" src="${esc(s.cov)}" alt="" onerror="this.style.visibility='hidden'"><div class="t">
+        <div><b>${esc(nm(s))}</b></div><div class="small">${esc(s.sl)} · ${esc(s.t)}</div><div class="small mut">${esc(s.ar)}</div></div>
+        <span class="chip ${k}">${l}</span></div>`;
+    }).join('') + (list.length > libShow ? '<button class="btn sec" id="more">Show more</button>' : '');
+    $$('#list .item').forEach(el => el.onclick = () => openSheet(byKey.get(el.dataset.k)));
+    if ($('#more')) $('#more').onclick = () => { libShow += 200; draw(); };
+  };
+  $('#q').oninput = e => { libQuery = e.target.value; libShow = 120; draw(); };
+  $$('.chips button').forEach(b => b.onclick = () => { libFilter = b.dataset.f; libShow = 120; $$('.chips button').forEach(x => x.classList.toggle('on', x === b)); draw(); });
+  draw();
+}
+function openSheet(s) {
+  const sh = $('#sheet'); const c = prog[s.k];
+  const stats = c ? `<div class="card small"><div class="row"><div>Next review<br><b>${new Date(c.due).toLocaleDateString()}</b></div><div>Interval<br><b>${c.ivl} day${c.ivl === 1 ? '' : 's'}</b></div><div>Misses<br><b>${c.lap || 0}</b></div></div></div>` : '';
+  sh.innerHTML = `<div class="bg"></div><div class="body"><div id="spl"></div>${infoBlock(s)}${stats}${connections(s)}
+    <div class="tiny mut" style="margin:4px 2px">Popularity rank #${s.r}</div>
+    ${c ? '<button class="btn danger" id="forget">Forget (learn it again from scratch)</button>' : ''}
+    <button class="btn sec" id="close">Close</button></div>`;
+  sh.classList.add('open');
+  mountPlayer($('#spl'), s);
+  const close = () => { stopPlayer(); sh.classList.remove('open'); sh.innerHTML = ''; };
+  $('.bg', sh).onclick = close; $('#close').onclick = close;
+  if ($('#forget')) $('#forget').onclick = e => {
+    if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again to confirm'; return; }
+    delete prog[s.k]; saveProg(); close(); render();
+  };
+}
+
+/* ============ Settings ============ */
+function renderSettings() {
+  const sel = (id, val, opts) => `<select id="${id}">${opts.map(([v, l]) => `<option value="${v}" ${String(val) === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  const sw = (id, val) => `<label class="sw"><input type="checkbox" id="${id}" ${val ? 'checked' : ''}><span></span></label>`;
+  app.innerHTML = `<h1>Settings</h1>
+    <div class="card">
+      <div class="set"><div>Anime names</div>${sel('names', settings.names, [['en', 'English'], ['ro', 'Romaji']])}</div>
+      <div class="set"><div>New openings per day</div>${sel('npd', settings.newPerDay, [[5, 5], [10, 10], [15, 15], [20, 20], [30, 30], [50, 50]])}</div>
+      <div class="set"><div>Songs per lesson</div>${sel('les', settings.lesson, [[5, 5], [8, 8], [10, 10], [15, 15]])}</div>
+      <div class="set"><div>Show video (off = audio + cover)</div>${sw('vid', settings.video)}</div>
+      <div class="set"><div>Start well-known songs mid-way<div class="tiny mut">Like a quiz that picks a random part</div></div>${sw('rs', settings.randomStart)}</div>
+      <div class="set"><div>Type the name for well-known songs<div class="tiny mut">Instead of multiple choice, after ~2 weeks</div></div>${sw('ty', settings.typed)}</div>
+    </div>
+    <h2>Backup</h2>
+    <div class="card"><div class="small mut">Progress is stored only in this browser. Copy a backup into Notes now and then.</div>
+      <button class="btn sec" id="bk">Copy backup</button>
+      <textarea id="bkt" placeholder="Paste a backup here to restore it" style="margin-top:10px"></textarea>
+      <button class="btn sec" id="rst">Restore from pasted backup</button></div>
+    <h2>Song list</h2>
+    <div class="card"><div class="small mut">${songs.length} openings${meta ? ', built ' + new Date(meta.built).toLocaleDateString() : ''}. Rebuilding refreshes the top 1000 ranking and keeps your progress.</div>
+      <button class="btn sec" id="rb">Rebuild song list</button><div id="rbs"></div></div>
+    <h2>Troubleshooting</h2>
+    <div class="card"><div class="small mut">If something breaks, run this and paste the result to Claude.</div>
+      <button class="btn sec" id="dg">Run diagnostics</button><div id="dgo"></div>
+      <button class="btn danger" id="wipe">Reset all progress</button></div>`;
+  $('#names').onchange = e => { settings.names = e.target.value; allNames = null; saveSet(); };
+  $('#npd').onchange = e => { settings.newPerDay = +e.target.value; saveSet(); };
+  $('#les').onchange = e => { settings.lesson = +e.target.value; saveSet(); };
+  $('#vid').onchange = e => { settings.video = e.target.checked; saveSet(); };
+  $('#rs').onchange = e => { settings.randomStart = e.target.checked; saveSet(); };
+  $('#ty').onchange = e => { settings.typed = e.target.checked; saveSet(); };
+  $('#bk').onclick = () => copyText(JSON.stringify({ app: 'opmemory', v: 1, at: Date.now(), prog, settings, daily }), 'Backup copied');
+  $('#rst').onclick = () => {
+    try {
+      const b = JSON.parse($('#bkt').value.trim());
+      if (b.app !== 'opmemory' || !b.prog) throw new Error('not an OP Memory backup');
+      prog = b.prog; saveProg();
+      if (b.settings) { settings = Object.assign(settings, b.settings); saveSet(); }
+      toast(`Restored ${Object.keys(prog).length} songs`); render();
+    } catch (e) { toast('Could not restore: ' + e.message); }
+  };
+  $('#rb').onclick = async () => {
+    $('#rb').disabled = true;
+    try { await runBuild($('#rbs')); toast('Song list rebuilt'); render(); }
+    catch (e) { $('#rb').disabled = false; }
+  };
+  $('#dg').onclick = async () => {
+    $('#dg').disabled = true; $('#dgo').innerHTML = '<div class="small mut" style="margin-top:8px">Running…</div>';
+    const txt = await diagnostics();
+    $('#dgo').innerHTML = `<textarea id="dgt" readonly>${esc(txt)}</textarea><button class="btn" id="dgc">Copy</button>`;
+    $('#dgc').onclick = () => copyText(txt, 'Diagnostics copied');
+    $('#dg').disabled = false;
+  };
+  $('#wipe').onclick = e => {
+    if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again: this erases all progress'; return; }
+    prog = {}; saveProg(); daily = { day: '', n: 0, r: 0 }; saveDaily(); toast('Progress reset'); render();
+  };
+}
+function copyText(t, msg) {
+  const fallback = () => { const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length); let ok = false; try { ok = document.execCommand('copy'); } catch (e) {} ta.remove(); toast(ok ? msg : 'Copy failed: select the text and copy it by hand'); };
+  try { navigator.clipboard.writeText(t).then(() => toast(msg), fallback); } catch (e) { fallback(); }
+}
+
+/* ============ Setup / building the song list ============ */
+function renderSetup() {
+  app.innerHTML = `<h1>OP Memory</h1>
+    <div class="card">Learn the 1000 most popular anime openings: watch them, connect each to its anime, title and artist, and review them on a spaced-repetition schedule.
+      <ul class="tips"><li>Rankings come from AniList popularity; videos are streamed from AnimeThemes.moe.</li>
+      <li>Building the list takes about 1–2 minutes. Keep this screen open.</li>
+      <li>Tip: add this page to your Home Screen (Share → Add to Home Screen). Safari is then less likely to clear your progress.</li></ul>
+      <button class="btn" id="build">Build my song list</button><div id="bs"></div></div>`;
+  $('#build').onclick = async () => {
+    $('#build').disabled = true;
+    try { await runBuild($('#bs')); go('today'); }
+    catch (e) { $('#build').disabled = false; $('#build').textContent = 'Try again'; }
+  };
+}
+async function runBuild(box) {
+  box.innerHTML = '<div class="loader"><div id="ld"></div></div><div class="small mut" id="lt">Starting…</div>';
+  const st = (m, f) => { const t = $('#lt', box), d = $('#ld', box); if (t) t.textContent = m; if (d && f != null) d.style.width = Math.round(f * 100) + '%'; };
+  try {
+    await buildSongs(st);
+  } catch (e) {
+    log('build failed: ' + e.message);
+    box.innerHTML = `<div class="err" style="margin-top:12px">Couldn't build the list:\n${esc(e.message)}</div>
+      <button class="btn sec" id="bd">Run diagnostics</button><div id="bdo"></div>`;
+    $('#bd', box).onclick = async () => {
+      $('#bdo', box).innerHTML = '<div class="small mut">Running…</div>';
+      const txt = await diagnostics();
+      $('#bdo', box).innerHTML = `<textarea readonly>${esc(txt)}</textarea><button class="btn" id="bdc">Copy for Claude</button>`;
+      $('#bdc', box).onclick = () => copyText(txt, 'Copied');
+    };
+    throw e;
+  }
+}
+
+const AL_URL = 'https://graphql.anilist.co';
+const AL_Q = `query($page:Int){Page(page:$page,perPage:50){pageInfo{hasNextPage}
+  media(type:ANIME,sort:POPULARITY_DESC,isAdult:false,format_not_in:[MUSIC]){
+    id title{romaji english} synonyms coverImage{large color} seasonYear season format
+    studios(isMain:true){nodes{name}}}}}`;
+async function anilist(query, variables, st) {
+  for (let a = 0; a < 6; a++) {
+    let r;
+    try { r = await fetch(AL_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ query, variables }) }); }
+    catch (e) { if (a < 2) { await sleep(3000); continue; } throw new Error('AniList unreachable (' + e.message + ')'); }
+    if (r.status === 429) { const ra = +r.headers.get('Retry-After') || 60; st && st(`AniList asked to slow down. Waiting ${ra}s…`); await sleep(ra * 1000 + 500); continue; }
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || j.errors) throw new Error('AniList ' + r.status + ': ' + JSON.stringify((j && j.errors) || '').slice(0, 300));
+    return j.data;
+  }
+  throw new Error('AniList kept rate-limiting');
+}
+/* AnimeThemes JSON:API. Two filter syntaxes and two artist include paths are tried, and whichever works is kept. */
+const AT_FILTERS = [
+  ids => `filter[has]=resources&filter[site]=AniList&filter[external_id]=${ids}`,
+  ids => `filter[resources][site]=AniList&filter[resources][external_id]=${ids}`
+];
+const AT_INCLUDES = [
+  'resources,animethemes.song.artists,animethemes.animethemeentries.videos',
+  'resources,animethemes.song.performances.artist,animethemes.animethemeentries.videos'
+];
+let atF = 0, atI = 0;
+async function atGet(url, st) {
+  for (let a = 0; a < 6; a++) {
+    let r;
+    try { r = await fetch(url, { headers: { Accept: 'application/json' } }); }
+    catch (e) { if (a < 2) { await sleep(3000); continue; } throw new Error('AnimeThemes unreachable (' + e.message + ')'); }
+    if (r.status === 429) { st && st('AnimeThemes asked to slow down. Waiting 60s…'); await sleep(61000); continue; }
+    if (!r.ok) { const t = await r.text().catch(() => ''); const e = new Error('AnimeThemes ' + r.status + ': ' + t.slice(0, 200)); e.status = r.status; throw e; }
+    return r.json();
+  }
+  throw new Error('AnimeThemes kept rate-limiting');
+}
+function alIdOf(a) {
+  const r = (a.resources || []).find(x => String(x.site).toLowerCase() === 'anilist');
+  return r ? Number(r.external_id) : null;
+}
+async function themesFor(ids, st) {
+  const idset = new Set(ids); let lastErr = null;
+  for (let fi = atF; fi < AT_FILTERS.length; fi++) {
+    for (let ii = atI; ii < AT_INCLUDES.length; ii++) {
+      let url = `https://api.animethemes.moe/anime?${AT_FILTERS[fi](ids.join(','))}&include=${AT_INCLUDES[ii]}&page[size]=100`;
+      const out = []; let pages = 0;
+      try {
+        while (url && pages < 4) { const j = await atGet(url, st); out.push(...(j.anime || [])); url = j.links && j.links.next; pages++; if (url) await sleep(700); }
+      } catch (e) { lastErr = e; log(`AT f${fi} i${ii}: ${e.message}`); if (e.status === 400 || e.status === 422) continue; throw e; }
+      const matched = out.filter(a => idset.has(alIdOf(a)));
+      if (out.length && matched.length >= out.length * 0.5) { atF = fi; atI = ii; return matched; }
+      log(`AT f${fi} i${ii}: got ${out.length}, matched ${matched.length}`);
+      if (!out.length) { lastErr = new Error('AnimeThemes returned no anime'); }
+      break; // include path worked, filter didn't: try next filter
+    }
+  }
+  throw lastErr || new Error('AnimeThemes data did not match AniList ids');
+}
+function pickVideo(entries) {
+  let best = null, bs = 1e9;
+  for (const e of entries) {
+    const es = (e.spoiler ? 3 : 0) + (e.nsfw ? 3 : 0) + ((e.version || 1) - 1) * 1.5;
+    for (const v of e.videos || []) {
+      const link = v.link || (v.basename ? 'https://v.animethemes.moe/' + v.basename : null);
+      if (!link) continue;
+      const sc = es + (v.overlap && v.overlap !== 'None' ? 2 : 0) + (v.lyrics ? 1 : 0) + (v.subbed ? 1 : 0) + (v.nc ? -0.3 : 0) + Math.abs((v.resolution || 720) - 720) / 400;
+      if (sc < bs) { bs = sc; best = { link, key: v.basename || link.split('/').pop() }; }
+    }
+  }
+  return best;
+}
+function artistsOf(song) {
+  if (!song) return [];
+  if (Array.isArray(song.artists) && song.artists.length) return song.artists.map(a => a.name).filter(Boolean);
+  if (Array.isArray(song.performances)) return song.performances.map(p => (p.artist && p.artist.name) || (p.member && p.member.name) || p.as).filter(Boolean);
+  return [];
+}
+const LATIN = /^[\p{Script=Latin}\p{N}\p{P}\p{S}\p{Zs}]+$/u;
+function candidatesFrom(a, m, pr, out) {
+  for (const th of a.animethemes || []) {
+    if (String(th.type).toUpperCase() !== 'OP') continue;
+    const v = pickVideo(th.animethemeentries || []); if (!v) continue;
+    const seq = th.sequence || 1, arts = artistsOf(th.song);
+    out.push({
+      k: v.key, aid: m.id, ro: (m.title && m.title.romaji) || a.name, en: (m.title && m.title.english) || '',
+      syn: (m.synonyms || []).filter(x => LATIN.test(x)).slice(0, 6),
+      cov: (m.coverImage && m.coverImage.large) || '', yr: m.seasonYear || a.year || null, se: m.season || '',
+      st: (m.studios && m.studios.nodes && m.studios.nodes[0] && m.studios.nodes[0].name) || '', fm: m.format || '',
+      sl: th.slug || ('OP' + seq), sq: seq, t: (th.song && th.song.title) || '(unknown title)',
+      ar: arts.join(', ') || '(unknown artist)', arl: arts.map(x => x.toLowerCase()),
+      v: v.link, page: a.slug ? 'https://animethemes.moe/anime/' + a.slug : '', pr, sc: pr + (seq - 1) * 120
+    });
+  }
+}
+async function buildSongs(st) {
+  const PAGES = 26, al = [];
+  for (let p = 1; p <= PAGES; p++) {
+    st(`Getting the most popular anime from AniList… ${p}/${PAGES}`, p / PAGES * 0.45);
+    const d = await anilist(AL_Q, { page: p }, st);
+    al.push(...d.Page.media);
+    if (!d.Page.pageInfo.hasNextPage) break;
+    await sleep(2100);
+  }
+  const rank = new Map(al.map((m, i) => [m.id, i + 1])), alById = new Map(al.map(m => [m.id, m]));
+  const cands = [], B = 50, nb = Math.ceil(al.length / B);
+  for (let b = 0; b < nb; b++) {
+    st(`Getting openings from AnimeThemes… ${b + 1}/${nb}`, 0.45 + (b + 1) / nb * 0.55);
+    const ids = al.slice(b * B, (b + 1) * B).map(m => m.id);
+    const list = await themesFor(ids, st);
+    for (const a of list) { const id = alIdOf(a); candidatesFrom(a, alById.get(id), rank.get(id), cands); }
+    await sleep(700);
+  }
+  // dedupe (same video, or same song credited to several entries), then rank
+  cands.sort((a, b) => a.sc - b.sc);
+  const seenK = new Set(), seenSong = new Set(), top = [];
+  for (const c of cands) {
+    const sk = norm(c.t) + '|' + norm(c.ar);
+    if (seenK.has(c.k) || (!/unknown/.test(sk) && seenSong.has(sk))) continue;
+    seenK.add(c.k); seenSong.add(sk); top.push(c);
+    if (top.length >= 1000) break;
+  }
+  if (top.length < 50) throw new Error(`Only found ${top.length} openings. Something is off with the data.`);
+  top.forEach((c, i) => { c.r = i + 1; });
+  // keep songs you already have progress on, even if they dropped out of the top 1000
+  let extra = 1000;
+  for (const old of songs) if (prog[old.k] && !seenK.has(old.k)) { old.r = ++extra; top.push(old); }
+  for (const c of top) { c.fk = Array.from(new Set([franchise(c.ro), franchise(c.en)].filter(Boolean))); delete c.sc; delete c.pr; }
+  songs = top; reindex(); allNames = null;
+  meta = { built: Date.now(), n: top.length };
+  if (!LS.set(K.songs, songs)) throw new Error('Could not save the song list in this browser (storage blocked?)');
+  LS.set(K.meta, meta);
+  log(`built ${top.length} songs from ${al.length} anime, ${cands.length} candidates`);
+  st(`Done: ${top.length} openings`, 1);
+}
+
+/* ============ diagnostics ============ */
+async function diagnostics() {
+  const out = [
+    'OP Memory diagnostics ' + new Date().toISOString(), 'UA: ' + navigator.userAgent,
+    `songs: ${songs.length}, progress: ${Object.keys(prog).length}, at filter/include: ${atF}/${atI}`,
+    `canPlay webm vp9: "${video.canPlayType('video/webm; codecs="vp9, opus"')}" webm: "${video.canPlayType('video/webm')}"`
+  ];
+  try { const d = await anilist('{Page(perPage:1){media(type:ANIME,sort:POPULARITY_DESC){id title{romaji}}}}', {}); out.push('AniList OK ' + JSON.stringify(d).slice(0, 120)); }
+  catch (e) { out.push('AniList FAIL ' + e.message); }
+  for (let f = 0; f < AT_FILTERS.length; f++) {
+    try {
+      const r = await fetch(`https://api.animethemes.moe/anime?${AT_FILTERS[f]('16498,21')}&include=${AT_INCLUDES[0]}&page[size]=3`);
+      const t = await r.text(); out.push(`AT JSON:API f${f} ${r.status}: ${t.slice(0, 700)}`);
+    } catch (e) { out.push(`AT JSON:API f${f} FAIL ${e.message}`); }
+  }
+  try {
+    const r = await fetch('https://graphql.animethemes.moe/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: '{__schema{queryType{fields{name args{name}}}}}' }) });
+    out.push('AT GraphQL ' + r.status + ': ' + (await r.text()).slice(0, 1500));
+  } catch (e) { out.push('AT GraphQL FAIL ' + e.message); }
+  if (songs[0]) out.push('sample song: ' + JSON.stringify(songs[0]).slice(0, 400));
+  out.push('--- log ---', ...logLines.slice(-30));
+  return out.join('\n');
+}
+
+window.addEventListener('error', e => log('JS error: ' + e.message + ' @' + e.lineno));
+window.addEventListener('unhandledrejection', e => log('Promise error: ' + (e.reason && e.reason.message)));
+render();
+</script>
+</body>
+</html>
