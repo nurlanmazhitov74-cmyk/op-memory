@@ -53,15 +53,15 @@ a{color:var(--acc2)}
 .vidwrap.audio:not(.masked) .poster{display:block}
 .vidwrap .verr{background:rgba(0,0,0,.85);font-size:14px;z-index:3}
 .vidwrap.err .verr{display:flex}
-.vidwrap .tap{background:rgba(0,0,0,.55);font-weight:600;z-index:2}
+.vidwrap .tap{background:rgba(0,0,0,.55);color:inherit;font:inherit;font-weight:600;border:0;width:100%;z-index:2}
 .vidwrap .ld{position:absolute;left:0;right:0;bottom:12px;text-align:center;font-size:13px;color:var(--mut);z-index:2;display:none;flex-direction:column;align-items:center}
-.vidwrap.loading .ld,.vidwrap.buf .ld{display:flex}
-.vidwrap.buf:not(.loading) .ld:empty:before{content:"Buffering…"}
+.vidwrap.buf .ld{display:flex}
 .vidwrap.audio audio{display:none}
 .ctl{display:flex;align-items:center;gap:8px;margin:-4px 0 12px}
 .ctl .cb{background:var(--card2);border:0;color:var(--text);border-radius:10px;width:44px;height:40px;font-size:17px;flex:none;font-family:inherit}
 .ctl .sk{flex:1;min-width:0;accent-color:var(--acc)}
 .ctl .tm{font-size:12px;color:var(--mut);min-width:72px;text-align:right;font-variant-numeric:tabular-nums}
+.media-mode{display:block;margin:-4px 0 12px}
 .vidwrap.needtap .tap{display:flex}
 .eq{display:flex;gap:5px;align-items:flex-end;height:40px}
 .eq i{display:block;width:7px;background:var(--acc);border-radius:3px;animation:eq 1s ease-in-out infinite}
@@ -152,8 +152,12 @@ const LS = {
 let songs = LS.get(K.songs, []);
 let meta = LS.get(K.meta, null);
 let prog = LS.get(K.prog, {});
-let settings = Object.assign({ names: 'en', newPerDay: 10, lesson: 10, randomStart: true, typed: true, video: false, lessonVideo: true }, LS.get(K.set, {}));
-if (!settings.mig2) { settings.video = false; settings.lessonVideo = true; settings.mig2 = true; try { localStorage.setItem(K.set, JSON.stringify(settings)); } catch (e) {} }
+let settings = Object.assign({ names: 'en', newPerDay: 10, lesson: 10, randomStart: true, typed: true, video: false, lessonVideo: false }, LS.get(K.set, {}));
+if (!settings.audioDefault) {
+  settings.lessonVideo = false;
+  settings.audioDefault = true;
+  try { localStorage.setItem(K.set, JSON.stringify(settings)); } catch (e) {}
+}
 let daily = LS.get(K.daily, { day: '', n: 0, r: 0 });
 let byKey = new Map();
 function reindex() { byKey = new Map(songs.map(s => [s.k, s])); }
@@ -230,179 +234,183 @@ function status(s) {
   return ['learn', 'Learning'];
 }
 
-/* ============ audio cache ============
-   AnimeThemes throttles heavy downloads, so questions use the small audio-only file, which is downloaded once,
-   kept in Cache Storage, and played from memory afterwards. Videos are only streamed where you choose video. */
+/* ============ audio sources ============ */
 const hasCaches = typeof caches !== 'undefined';
-const AC_NAME = 'opm-audio-v1', AC_MAX = 400;
-let acIdx = LS.get('opm.acidx', {});          // url -> last used (for evicting the oldest)
-let corsState = LS.get('opm.cors', null);     // {ok, at}: can we download audio files at all?
-let idxT; const saveIdx = () => { clearTimeout(idxT); idxT = setTimeout(() => LS.set('opm.acidx', acIdx), 800); };
-const corsBlocked = () => corsState && corsState.ok === false && Date.now() - corsState.at < 864e5;
-function audioUrl(s) {
-  if (s.a) return s.a;
-  const b = String(s.v || '').split('/').pop().replace(/\.webm$/i, '.ogg');
-  return 'https://a.animethemes.moe/' + b;
+const AC_NAME = 'opm-audio-v1';
+const basename = url => String(url || '').split(/[?#]/)[0].split('/').pop();
+async function cachedAudio(url) {
+  if (!hasCaches || !url) return null;
+  try {
+    const response = await caches.match(url, { cacheName: AC_NAME });
+    return response ? await response.blob() : null;
+  } catch (e) { return null; }
 }
-async function cacheGet(url) {
-  if (!hasCaches) return null;
-  try { const c = await caches.open(AC_NAME); const r = await c.match(url); if (!r) return null; acIdx[url] = Date.now(); saveIdx(); return await r.blob(); }
-  catch (e) { return null; }
-}
-async function cacheHas(url) { if (!hasCaches) return false; try { const c = await caches.open(AC_NAME); return !!(await c.match(url)); } catch (e) { return false; } }
-async function evict(c) {
-  const urls = Object.keys(acIdx); if (urls.length <= AC_MAX) return;
-  urls.sort((x, y) => acIdx[x] - acIdx[y]);
-  for (const u of urls.slice(0, urls.length - AC_MAX)) { try { await c.delete(u); } catch (e) {} delete acIdx[u]; }
-  saveIdx();
-}
-const loadLbl = new Map(), inflight = new Map();
-function download(url) {
-  if (inflight.has(url)) return inflight.get(url);
-  const p = (async () => {
-    const r = await fetch(url, { mode: 'cors' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const total = +r.headers.get('Content-Length') || 0; let blob;
-    if (r.body && r.body.getReader) {
-      const rd = r.body.getReader(), parts = []; let got = 0;
-      for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; loadLbl.set(url, total ? Math.round(got / total * 100) + '%' : (got / 1048576).toFixed(1) + ' MB'); }
-      blob = new Blob(parts, { type: 'audio/ogg' });
-    } else blob = await r.blob();
-    if (hasCaches) {
-      try { const c = await caches.open(AC_NAME); await c.put(url, new Response(blob, { headers: { 'Content-Type': 'audio/ogg' } })); acIdx[url] = Date.now(); saveIdx(); evict(c); }
-      catch (e) { log('cache put failed: ' + e.message); }
-    }
-    return blob;
-  })();
-  inflight.set(url, p);
-  p.then(() => {}, () => {}).then(() => { inflight.delete(url); loadLbl.delete(url); });
-  return p;
-}
-const memo = new Map(); // url -> object URL for this session
-function memoSet(url, o) { memo.set(url, o); if (memo.size > 40) { const [k, v] = memo.entries().next().value; if (v !== audio.src) { URL.revokeObjectURL(v); memo.delete(k); } } }
-async function ensureBlob(s) { // returns a Blob, or null if downloading isn't possible
-  const url = audioUrl(s);
-  let b = await cacheGet(url);
-  if (b || corsBlocked()) return b;
-  try { b = await download(url); if (!corsState || !corsState.ok) { corsState = { ok: true, at: Date.now() }; LS.set('opm.cors', corsState); } return b; }
-  catch (e) {
-    log('audio download failed: ' + e.message + ' ' + url);
-    if (!(corsState && corsState.ok)) { corsState = { ok: false, at: Date.now() }; LS.set('opm.cors', corsState); }
-    return null;
-  }
-}
-async function audioSrc(s) {
-  const url = audioUrl(s);
-  if (memo.has(url)) return memo.get(url);
-  const b = await ensureBlob(s);
-  if (!b) return url; // fall back to streaming
-  const o = URL.createObjectURL(b); memoSet(url, o); return o;
-}
-let pfChain = Promise.resolve();
-function prefetch(list) {
-  if (!OGG || corsBlocked()) return;
-  for (const s of list) if (s) pfChain = pfChain.then(async () => { if (!(await cacheHas(audioUrl(s)))) await ensureBlob(s); }).catch(() => {});
+async function audioSource(s) {
+  // Old versions cached audio against a URL derived from the original video basename.
+  const file = basename(s.v);
+  const legacyCacheKey = /\.webm$/i.test(file) ? 'https://a.animethemes.moe/' + file.replace(/\.webm$/i, '.ogg') : '';
+  const cached = await cachedAudio(s.a || legacyCacheKey);
+  if (cached) return cached;
+  if (s.a !== undefined) return s.a;
+  const resolved = await lookupMedia(s);
+  if (resolved?.link) s.v = resolved.link;
+  if (resolved) s.a = resolved.audio;
+  return s.a;
 }
 
 /* ============ player ============ */
 const video = document.createElement('video');
-video.setAttribute('playsinline', ''); video.setAttribute('webkit-playsinline', ''); video.preload = 'metadata';
-const audio = document.createElement('audio'); audio.preload = 'auto';
-const OGG = (() => { const a = document.createElement('audio'); return !!(a.canPlayType('audio/ogg; codecs="opus"') || a.canPlayType('audio/ogg; codecs="vorbis"') || a.canPlayType('audio/ogg')); })();
-const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-let media = video, playStartedAt = 0, onEnded = null, curWrap = null, curBar = null, curMount = null, mountId = 0, curStart = 0;
-// iOS only lets a media element play from script after it has been played once inside a tap. Do that on the first tap.
+video.setAttribute('playsinline', ''); video.setAttribute('webkit-playsinline', ''); video.preload = 'none';
+const audio = document.createElement('audio'); audio.preload = 'none';
+const OGG = !!(audio.canPlayType('audio/ogg; codecs="opus"') || audio.canPlayType('audio/ogg'));
+const SILENT = 'data:audio/wav;base64,UklGRkQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSAAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
+let media = audio, playStartedAt = 0, curMount = null, objectUrl = '';
+// Warm up the audio element inside a gesture on browsers that require one.
 let unlocked = false;
 function unlock() {
-  if (unlocked) return; unlocked = true;
-  try { audio.src = SILENT; const p = audio.play(); if (p && p.then) p.then(() => { if (String(audio.src).startsWith('data:')) audio.pause(); }, () => { unlocked = false; }); } catch (e) { unlocked = false; }
+  if (unlocked || audio.hasAttribute('src')) return;
+  unlocked = true;
+  audio.src = SILENT;
+  audio.play().then(() => {
+    if (audio.getAttribute('src') === SILENT) audio.pause();
+  }, () => { unlocked = false; });
 }
 document.addEventListener('touchend', unlock, true);
 document.addEventListener('click', unlock, true);
 const fmt = t => { t = Math.max(0, Math.floor(t || 0)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
 function updBar() {
-  if (!curBar) return;
+  if (!curMount) return;
+  const { bar } = curMount;
   const d = media.duration, c = media.currentTime;
-  curBar.querySelector('[data-c=pp]').textContent = media.paused ? '▶' : '❚❚';
-  const sk = curBar.querySelector('.sk'); if (!sk.dataset.drag && isFinite(d) && d > 0) sk.value = Math.round(c / d * 1000);
-  curBar.querySelector('.tm').textContent = fmt(c) + (isFinite(d) && d > 0 ? ' / ' + fmt(d) : '');
+  bar.querySelector('[data-c=pp]').textContent = media.paused ? '▶' : '❚❚';
+  const sk = bar.querySelector('.sk'); if (!sk.dataset.drag && isFinite(d) && d > 0) sk.value = Math.round(c / d * 1000);
+  bar.querySelector('.tm').textContent = fmt(c) + (isFinite(d) && d > 0 ? ' / ' + fmt(d) : '');
 }
 for (const el of [video, audio]) {
-  el.addEventListener('playing', () => { if (el !== media) return; if (!playStartedAt) playStartedAt = Date.now(); if (curWrap) curWrap.classList.remove('needtap', 'buf'); });
-  el.addEventListener('waiting', () => { if (el === media && curWrap) curWrap.classList.add('buf'); });
-  el.addEventListener('ended', () => { if (el === media && onEnded) onEnded(); updBar(); });
-  for (const ev of ['timeupdate', 'play', 'pause', 'durationchange']) el.addEventListener(ev, () => { if (el === media) updBar(); });
+  const isCurrent = () => el === media && curMount && el.hasAttribute('src') && el.getAttribute('src') !== SILENT;
+  el.addEventListener('playing', () => {
+    if (!isCurrent()) return;
+    if (el === audio) unlocked = true;
+    if (!playStartedAt) playStartedAt = Date.now();
+    curMount.wrap.classList.remove('needtap', 'buf', 'err');
+  });
+  el.addEventListener('waiting', () => { if (isCurrent() && !el.paused) curMount.wrap.classList.add('buf'); });
+  el.addEventListener('pause', () => { if (isCurrent()) curMount.wrap.classList.remove('buf'); });
+  el.addEventListener('ended', () => { if (isCurrent()) { updBar(); curMount.onEnded?.(); } });
+  for (const ev of ['timeupdate', 'play', 'pause', 'durationchange']) el.addEventListener(ev, () => { if (isCurrent()) updBar(); });
   el.addEventListener('error', () => {
-    if (el !== media || String(el.src).startsWith('data:')) return;
-    log((el === audio ? 'audio' : 'video') + ' error ' + (el.error && el.error.code) + ' ' + el.currentSrc);
-    if (el === audio && curMount && !curMount.opts.fallback) { // audio file wouldn't play: use the video instead
-      const m = curMount; return mountPlayer(m.container, m.s, Object.assign({}, m.opts, { want: 'video', fallback: true }));
-    }
-    if (curWrap) curWrap.classList.add('err');
+    if (!isCurrent() || !el.error) return;
+    log((el === audio ? 'audio' : 'video') + ' error ' + el.error.code + ' ' + el.currentSrc);
+    curMount.fail(el === audio ? 'Audio couldn’t play.' : 'Video couldn’t play.');
   });
 }
-function setLoading(w, t) { const l = w.querySelector('.ld'); if (l) l.innerHTML = t; w.classList.toggle('loading', !!t); }
+
 function mountPlayer(container, s, opts = {}) {
-  const { start = 0, masked = false } = opts;
-  const want = opts.want || (settings.video ? 'video' : 'audio');
-  const mode = want === 'audio' && OGG ? 'audio' : 'video';
-  const id = ++mountId;
-  try { video.pause(); } catch (e) {} try { audio.pause(); } catch (e) {}
-  curMount = { container, s, opts };
-  container.innerHTML = `<div class="vidwrap ${masked ? 'masked' : ''} ${mode === 'audio' ? 'audio' : ''}">
+  stopPlayer();
+  const { start = 0, masked = false, playVideo = false, onEnded } = opts;
+  const mode = opts.want || (settings.video ? 'video' : 'audio');
+  const isAudio = mode === 'audio';
+  const alternate = isAudio ? 'video' : 'audio';
+  const canSwitch = isAudio ? !!s.v : s.a !== null;
+  container.innerHTML = `<div class="vidwrap ${masked ? 'masked' : ''} ${isAudio ? 'audio' : ''}">
     <img class="poster" src="${esc(s.cov)}" alt="">
     <div class="mask"><div class="eq"><i></i><i></i><i></i><i></i><i></i></div><div class="small mut">Listen…</div></div>
-    <div class="ld"></div>
-    <div class="tap">▶ Tap to play</div>
-    <div class="verr">This wouldn't play.<a href="${esc(s.page || 'https://animethemes.moe')}" target="_blank" rel="noopener">Open it on AnimeThemes</a></div>
+    <div class="ld">Buffering…</div>
+    <button class="tap" type="button">▶ Tap to play</button>
+    <div class="verr"><span></span>
+      ${isAudio && canSwitch && masked ? '<button class="x" data-c="mode">Play video</button>' : ''}
+      <button class="x" data-c="retry">Retry</button>
+      <a href="${esc(s.page || 'https://animethemes.moe')}" target="_blank" rel="noopener">Open it on AnimeThemes</a>
+    </div>
   </div>
-  <div class="ctl"><button class="cb" data-c="rs" aria-label="Restart">⟲</button><button class="cb" data-c="pp" aria-label="Play or pause">❚❚</button><input class="sk" type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="tm">0:00</span></div>`;
-  const w = container.firstElementChild, bar = container.querySelector('.ctl');
-  curWrap = w; curBar = bar; playStartedAt = 0; curStart = start;
-  media = mode === 'audio' ? audio : video;
-  if (mode === 'video') w.insertBefore(video, w.firstChild); else w.appendChild(audio);
-  bar.querySelector('[data-c=rs]').onclick = restart;
-  bar.querySelector('[data-c=pp]').onclick = () => { if (media.paused) tryPlay(w); else media.pause(); };
-  const sk = bar.querySelector('.sk');
-  sk.oninput = () => { sk.dataset.drag = 1; const d = media.duration; if (isFinite(d) && d > 0) bar.querySelector('.tm').textContent = fmt(sk.value / 1000 * d) + ' / ' + fmt(d); };
-  sk.onchange = () => { delete sk.dataset.drag; const d = media.duration; if (isFinite(d) && d > 0) { try { media.currentTime = sk.value / 1000 * d; } catch (e) {} } };
-  w.querySelector('.tap').onclick = () => tryPlay(w);
-  const go = src => {
-    if (id !== mountId) return;
-    setLoading(w, '');
-    if (media.getAttribute('src') !== src) {
-      media.setAttribute('src', src);
-      if (start > 0) media.addEventListener('loadedmetadata', () => { if (id === mountId) { try { media.currentTime = start; } catch (e) {} } }, { once: true });
-    } else { try { media.currentTime = start; } catch (e) {} }
-    tryPlay(w); updBar();
+  <div class="ctl"><button class="cb" data-c="rs" aria-label="Restart">⟲</button><button class="cb" data-c="pp" aria-label="Play or pause">▶</button><input class="sk" type="range" min="0" max="1000" value="0" aria-label="Seek"><span class="tm">0:00</span></div>
+  ${canSwitch && !masked ? `<button class="x media-mode" data-c="mode">${isAudio ? 'Play video' : 'Audio only'}</button>` : ''}`;
+  const wrap = container.firstElementChild, bar = container.querySelector('.ctl');
+  media = isAudio ? audio : video;
+  const el = media;
+  if (isAudio) wrap.appendChild(el); else wrap.insertBefore(el, wrap.firstChild);
+
+  let source = isAudio ? '' : s.v;
+  const fail = (message, retryable = true) => {
+    el.pause();
+    wrap.querySelector('.verr span').textContent = message;
+    wrap.querySelector('[data-c=retry]').hidden = !retryable;
+    wrap.classList.remove('buf', 'needtap');
+    wrap.classList.add('err');
   };
-  if (mode === 'video') go(s.v);
-  else {
-    const url = audioUrl(s);
-    if (memo.has(url)) go(memo.get(url));
-    else {
-      setLoading(w, 'Loading…');
-      const t0 = Date.now();
-      const tick = setInterval(() => {
-        if (id !== mountId || !w.classList.contains('loading')) return clearInterval(tick);
-        const lbl = loadLbl.get(url);
-        setLoading(w, `Loading${lbl ? ' ' + lbl : '…'}` + (Date.now() - t0 > 8000 ? '<button class="x" style="margin-top:8px">Stream it instead</button>' : ''));
-        const b = w.querySelector('.ld button'); if (b) b.onclick = () => { clearInterval(tick); go(url); };
-      }, 500);
-      audioSrc(s).then(src => { clearInterval(tick); go(src); });
+  const play = () => {
+    if (curMount !== mount || !source) return;
+    if (el.getAttribute('src') !== source) {
+      el.src = source;
+      // A seek before metadata is loaded sets the initial playback position.
+      if (start > 0) el.currentTime = start;
     }
+    el.play().catch(e => {
+      if (curMount !== mount) return;
+      if (e.name === 'NotAllowedError') wrap.classList.add('needtap');
+      else if (e.name !== 'AbortError') log('play failed: ' + e.name + ' ' + e.message);
+    });
+    updBar();
+  };
+  const restart = () => {
+    if (el.getAttribute('src') === source && source) el.currentTime = start;
+    play();
+  };
+  const mount = { wrap, bar, restart, onEnded, fail };
+  curMount = mount;
+  playStartedAt = 0;
+  bar.querySelector('[data-c=rs]').onclick = restart;
+  bar.querySelector('[data-c=pp]').onclick = () => { if (el.paused) play(); else el.pause(); };
+  const sk = bar.querySelector('.sk');
+  sk.oninput = () => { sk.dataset.drag = 1; const d = el.duration; if (isFinite(d) && d > 0) bar.querySelector('.tm').textContent = fmt(sk.value / 1000 * d) + ' / ' + fmt(d); };
+  sk.onchange = () => { delete sk.dataset.drag; const d = el.duration; if (isFinite(d) && d > 0) el.currentTime = sk.value / 1000 * d; };
+  wrap.querySelector('.tap').onclick = play;
+  const toggle = container.querySelector('[data-c=mode]');
+  if (toggle) toggle.onclick = () => mountPlayer(container, s, {
+    ...opts, masked: wrap.classList.contains('masked'), want: alternate, playVideo: isAudio
+  });
+  wrap.querySelector('[data-c=retry]').onclick = () => mountPlayer(container, s, {
+    ...opts, masked: wrap.classList.contains('masked'), playVideo: !isAudio
+  });
+
+  if (!isAudio) {
+    if (!source) fail('No video is available for this opening.', false);
+    else if (playVideo) play();
+    else wrap.classList.add('needtap');
+    return;
   }
-  return w;
+  const status = wrap.querySelector('.ld');
+  status.textContent = 'Loading audio…';
+  wrap.classList.add('buf');
+  audioSource(s).then(result => {
+    if (curMount !== mount) return;
+    if (!result) return fail('AnimeThemes has no audio track for this opening.', false);
+    const cached = result instanceof Blob;
+    if (!OGG && (cached ? result.type.includes('ogg') : /\.ogg(?:[?#]|$)/i.test(result))) {
+      return fail('This browser can’t play Ogg audio.', false);
+    }
+    if (cached) objectUrl = URL.createObjectURL(result);
+    source = objectUrl || result;
+    status.textContent = 'Buffering…';
+    wrap.classList.remove('buf');
+    play();
+  }).catch(e => {
+    if (curMount !== mount) return;
+    log('Audio lookup failed: ' + e.message);
+    fail('Couldn’t get the audio link from AnimeThemes.');
+  });
 }
-function restart() { try { media.currentTime = curStart || 0; } catch (e) {} if (curWrap) tryPlay(curWrap); }
-function tryPlay(w) {
-  try {
-    const p = media.play();
-    if (p && p.catch) p.catch(e => { if (e.name === 'NotAllowedError') w.classList.add('needtap'); else if (e.name !== 'AbortError') log('play failed: ' + e.name + ' ' + e.message); });
-  } catch (e) { w.classList.add('needtap'); }
+function restart() { curMount?.restart(); }
+function stopPlayer() {
+  curMount = null;
+  for (const el of [audio, video]) {
+    if (!el.hasAttribute('src') || el.getAttribute('src') === SILENT) continue;
+    el.pause();
+    el.removeAttribute('src');
+    el.load();
+  }
+  if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = ''; }
 }
-function reveal(w) { w.classList.remove('masked'); }
-function stopPlayer() { onEnded = null; mountId++; try { video.pause(); } catch (e) {} try { audio.pause(); } catch (e) {} }
 
 /* ============ shared UI blocks ============ */
 function seasonText(s) { const se = s.se ? s.se[0] + s.se.slice(1).toLowerCase() + ' ' : ''; return s.yr ? se + s.yr : ''; }
@@ -464,15 +472,14 @@ function renderQuestion(s, variant, typed, onGrade, onNext, opt = {}) {
   app.innerHTML = topbar(opt.label || '', opt.progress || 0) + `<div id="pl"></div>
     <div class="q">${QTEXT[variant]}</div><div id="ans"></div><div id="after"></div>`;
   $('#quit').onclick = opt.onQuit;
-  const w = mountPlayer($('#pl'), s, { start: opt.start || 0, masked: true, want: 'audio' });
-  prefetch(opt.next || []);
+  mountPlayer($('#pl'), s, { start: opt.start || 0, masked: true, want: 'audio' });
   let answered = false;
   const correct = VAL[variant](s);
   const finish = (ok, note) => {
     if (answered) return; answered = true;
     const ms = playStartedAt ? Date.now() - playStartedAt : 1e9;
     onGrade(ok, ok && ms < 6000);
-    reveal(w);
+    $('#pl .vidwrap').classList.remove('masked');
     $('#after').innerHTML = `<div class="result ${ok ? 'ok' : 'bad'}">${ok ? (ms < 6000 ? '✓ Correct, and quick' : '✓ Correct') : '✗ ' + (note || 'Not this time')}</div>
       ${infoBlock(s)}${connections(s)}<button class="btn" id="next">Next</button>`;
     $('#next').onclick = onNext;
@@ -552,7 +559,7 @@ function renderToday() {
     </div>
     ${t.r ? `<div class="small mut" style="text-align:center">${t.r} reviews done today</div>` : ''}
     ${learned === 0 ? `<h2>How this works</h2><ul class="tips">
-      <li><b>Learn</b>: watch each new opening with its anime, song title and artist, then a quick check on that batch.</li>
+      <li><b>Learn</b>: listen to each new opening with its anime, song title and artist, then take a quick check.</li>
       <li><b>Review</b>: songs come back right before you'd forget them. A miss brings a song back sooner; a quick right answer pushes it further out.</li>
       <li><b>Listen</b>: play your learned songs back to back, with their info on screen.</li>
       <li>Your progress stays on this phone. Use Settings → Backup now and then.</li></ul>` : ''}`;
@@ -566,7 +573,6 @@ function startLesson() {
   const items = newList().slice(0, settings.lesson);
   if (!items.length) return;
   L = { items, i: 0, phase: 'intro', queue: [], done: 0, quitArm: false };
-  prefetch(items);
   go('learn');
 }
 function quitLesson() {
@@ -598,8 +604,9 @@ function renderLearn() {
       L.queue.shift();
       if (ok) L.done++; else L.queue.splice(Math.min(2, L.queue.length), 0, s.k);
     }, () => { L.quitArm = false; renderLearn(); window.scrollTo(0, 0); },
-    { label: `Check ${Math.min(L.done + 1, L.total)}/${L.total}`, progress: 50 + L.done / L.total * 50, pool: L.items, onQuit: quitLesson, next: L.queue.slice(1, 3).map(k => byKey.get(k)) });
+    { label: `Check ${Math.min(L.done + 1, L.total)}/${L.total}`, progress: 50 + L.done / L.total * 50, pool: L.items, onQuit: quitLesson });
   } else {
+    stopPlayer();
     const more = newList().length;
     app.innerHTML = `<h1>Lesson done</h1><div class="card">You added <b>${L.items.length}</b> openings. Their first review is tomorrow.
       <div class="small mut" style="margin-top:8px">Listening to them a couple more times today makes them stick better.</div></div>
@@ -629,6 +636,7 @@ function startReview() {
 function renderReview() {
   if (!R) return go('today');
   if (!R.queue.length) {
+    stopPlayer();
     const more = dueList().length;
     app.innerHTML = `<h1>Reviews done</h1><div class="stats"><div class="stat"><b>${R.done}</b><span>reviewed</span></div><div class="stat"><b>${R.done ? Math.round(R.ok / R.done * 100) : 0}%</b><span>right first time</span></div></div>
       ${more ? `<button class="btn" id="more">Keep going · ${more} due</button>` : ''}<button class="btn sec" id="done">Done</button>`;
@@ -651,7 +659,7 @@ function renderReview() {
     R.done++; if (ok) R.ok++;
     if (!ok && variant === 'anime') { R.retry.add(s.k); R.queue.splice(Math.min(4, R.queue.length), 0, s.k); }
   }, () => { renderReview(); window.scrollTo(0, 0); }, {
-    label: retry ? 'Again' : `${R.done + 1}/${R.total}`, progress: R.done / R.total * 100, start, next: R.queue.slice(1, 3).map(k => byKey.get(k)),
+    label: retry ? 'Again' : `${R.done + 1}/${R.total}`, progress: R.done / R.total * 100, start,
     onQuit: () => { R = null; go('today'); }
   });
 }
@@ -677,19 +685,16 @@ function renderListen() {
     return;
   }
   const s = byKey.get(LI.list[LI.i]);
-  if (!s) { LI = null; return renderListen(); }
+  if (!s) { stopPlayer(); LI = null; return renderListen(); }
   app.innerHTML = `<div class="topbar"><button class="x" id="back">‹ Back</button><div class="small mut" style="flex:1;text-align:right">${esc(LI.name)} · ${LI.i + 1}/${LI.list.length}</div></div>
     <div id="pl"></div>
-    <div class="row" style="margin-bottom:12px"><button class="btn sec" id="pv" ${LI.i ? '' : 'disabled'}>‹ Prev</button><button class="btn sec" id="vt">${settings.video ? 'Audio only' : 'Show video'}</button><button class="btn sec" id="nx" ${LI.i < LI.list.length - 1 ? '' : 'disabled'}>Next ›</button></div>
+    <div class="row" style="margin-bottom:12px"><button class="btn sec" id="pv" ${LI.i ? '' : 'disabled'}>‹ Prev</button><button class="btn sec" id="nx" ${LI.i < LI.list.length - 1 ? '' : 'disabled'}>Next ›</button></div>
     ${infoBlock(s)}${connections(s)}`;
-  mountPlayer($('#pl'), s);
-  if (!settings.video) prefetch(LI.list.slice(LI.i + 1, LI.i + 3).map(k => byKey.get(k)));
   const step = d => { LI.i += d; renderListen(); window.scrollTo(0, 0); };
-  onEnded = () => { if (LI && LI.i < LI.list.length - 1) step(1); };
+  mountPlayer($('#pl'), s, { onEnded: () => { if (LI && LI.i < LI.list.length - 1) step(1); } });
   $('#back').onclick = () => { stopPlayer(); LI = null; renderListen(); };
   $('#pv').onclick = () => step(-1);
   $('#nx').onclick = () => step(1);
-  $('#vt').onclick = () => { settings.video = !settings.video; saveSet(); renderListen(); };
 }
 
 /* ============ Library ============ */
@@ -754,8 +759,8 @@ function renderSettings() {
       <div class="set"><div>Anime names</div>${sel('names', settings.names, [['en', 'English'], ['ro', 'Romaji']])}</div>
       <div class="set"><div>New openings per day</div>${sel('npd', settings.newPerDay, [[5, 5], [10, 10], [15, 15], [20, 20], [30, 30], [50, 50]])}</div>
       <div class="set"><div>Songs per lesson</div>${sel('les', settings.lesson, [[5, 5], [8, 8], [10, 10], [15, 15]])}</div>
-      <div class="set"><div>Video in lessons<div class="tiny mut">Off = audio + cover. Video is ~15× more data</div></div>${sw('lvid', settings.lessonVideo)}</div>
-      <div class="set"><div>Video in Listen & Library<div class="tiny mut">Quizzes always use audio only</div></div>${sw('vid', settings.video)}</div>
+      <div class="set"><div>Show video player in lessons<div class="tiny mut">Each video starts when you tap Play</div></div>${sw('lvid', settings.lessonVideo)}</div>
+      <div class="set"><div>Show video player in Listen & Library<div class="tiny mut">Quizzes start with audio</div></div>${sw('vid', settings.video)}</div>
       <div class="set"><div>Start well-known songs mid-way<div class="tiny mut">Like a quiz that picks a random part</div></div>${sw('rs', settings.randomStart)}</div>
       <div class="set"><div>Type the name for well-known songs<div class="tiny mut">Instead of multiple choice, after ~2 weeks</div></div>${sw('ty', settings.typed)}</div>
     </div>
@@ -783,13 +788,19 @@ function renderSettings() {
   $('#lvid').onchange = e => { settings.lessonVideo = e.target.checked; saveSet(); };
   $('#sv').onclick = saveSongsFile;
   (async () => {
-    const n = Object.keys(acIdx).length; let est = '';
-    try { const e = await navigator.storage.estimate(); est = ` · this app uses ${(e.usage / 1048576).toFixed(0)} MB`; } catch (e) {}
-    const el = $('#acinfo'); if (el) el.textContent = hasCaches ? `${n} songs saved on this phone (keeps the last ${AC_MAX})${est}` : 'This browser cannot save audio.';
+    let n = 0;
+    if (hasCaches) {
+      try { if (await caches.has(AC_NAME)) n = (await (await caches.open(AC_NAME)).keys()).length; } catch (e) {}
+    }
+    const el = $('#acinfo'); if (el) el.textContent = `${n} tracks saved by earlier versions.`;
   })();
   $('#acclr').onclick = async e => {
     if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again to delete'; return; }
-    try { await caches.delete(AC_NAME); } catch (er) {} acIdx = {}; LS.set('opm.acidx', acIdx); memo.clear(); toast('Saved audio deleted'); render();
+    try {
+      if (hasCaches) await caches.delete(AC_NAME);
+      localStorage.removeItem('opm.acidx');
+      toast('Saved audio deleted'); render();
+    } catch (er) { toast('Could not delete saved audio'); }
   };
   $('#rs').onchange = e => { settings.randomStart = e.target.checked; saveSet(); };
   $('#ty').onchange = e => { settings.typed = e.target.checked; saveSet(); };
@@ -854,7 +865,7 @@ async function loadBakedSongs() {
 function renderSetup() {
   app.innerHTML = `<h1>OP Memory</h1>
     <div class="card">Learn the 1000 most popular anime openings: watch them, connect each to its anime, title and artist, and review them on a spaced-repetition schedule.
-      <ul class="tips"><li>Rankings come from AniList popularity; videos are streamed from AnimeThemes.moe.</li>
+      <ul class="tips"><li>Rankings come from AniList popularity. Audio and optional video stream from AnimeThemes.moe.</li>
       <li>Building the list takes about 1–2 minutes. Keep this screen open.</li>
       <li>Tip: add this page to your Home Screen (Share → Add to Home Screen). Safari is then less likely to clear your progress.</li></ul>
       <div class="tiny mut">No songs.json found next to this page, so the list has to be built here once. Afterwards save it from Settings and upload it to the repo.</div><button class="btn" id="build">Build my song list</button><div id="bs"></div></div>`;
@@ -906,6 +917,48 @@ async function anilist(query, variables, st) {
 /* AnimeThemes GraphQL. Their schema is read at runtime (introspection) and the query is built from the
    field names that actually exist, so renames like animethemes→themes or lists→connections don't break it. */
 const AT_GQL = 'https://graphql.animethemes.moe/';
+const mediaQueries = new Map();
+async function mediaQuery(key, query, variables) {
+  if (!mediaQueries.has(key)) {
+    const request = (async () => {
+      const response = await fetch(AT_GQL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables }), signal: AbortSignal.timeout(15000)
+      });
+      if (!response.ok) throw new Error('AnimeThemes HTTP ' + response.status);
+      const result = await response.json();
+      if (!result.data || result.errors?.length) throw new Error(result.errors?.[0]?.message || 'No response data');
+      return result.data;
+    })().catch(err => { mediaQueries.delete(key); throw err; });
+    mediaQueries.set(key, request);
+  }
+  return mediaQueries.get(key);
+}
+async function lookupMedia(s) {
+  const file = /\.webm$/i.test(s.k) ? s.k : basename(s.v);
+  const slug = String(s.page || '').match(/\/anime\/([\w-]+)/)?.[1];
+  if (slug) {
+    const data = await mediaQuery('anime:' + slug, `query($slug:String!){anime(slug:$slug){
+      animethemes{slug animethemeentries{version spoiler nsfw videos(first:30){nodes{
+        basename link resolution size overlap audio{link size}
+      }}}}
+    }}`, { slug });
+    const themes = data.anime?.animethemes || [];
+    const normalizeEntry = entry => ({ ...entry, videos: entry.videos?.nodes || [] });
+    for (const entry of themes.flatMap(theme => theme.animethemeentries || []).map(normalizeEntry)) {
+      const match = entry.videos.find(v => v.basename === file);
+      if (match) return entryMedia(entry, match);
+    }
+    const theme = themes.find(t => t.slug === s.sl);
+    if (theme) return pickVideo((theme.animethemeentries || []).map(normalizeEntry));
+  }
+  if (!file) return null;
+  const data = await mediaQuery('video:' + file, `query($file:String!){
+    videoPagination(first:1,basename:$file){data{link audio{link}}}
+  }`, { file });
+  const v = data.videoPagination.data[0];
+  return v ? { link: v.link, audio: v.audio?.link || null } : null;
+}
 async function atPost(query, st) {
   for (let a = 0; a < 6; a++) {
     let r;
@@ -1017,8 +1070,8 @@ async function atPlan() {
   const rEnt = await relation(Th, 'animethemeentries', 'entries');
   const rVid = rEnt ? await relation(rEnt.T, 'videos') : null;
   const rAud = rVid ? await relation(rVid.T, 'audio') : null;
-  const audSel = rAud && fieldOf(rAud.T, 'link') ? ` ${rAud.name}{link}` : '';
-  const vidSel = rVid ? sel(rVid, scalars(rVid.T, ['link', 'basename', 'resolution', 'nc', 'overlap', 'lyrics', 'subbed']) + audSel) : '';
+  const audSel = rAud && fieldOf(rAud.T, 'link') ? sel(rAud, scalars(rAud.T, ['link', 'size'])) : '';
+  const vidSel = rVid ? sel(rVid, `${scalars(rVid.T, ['link', 'basename', 'resolution', 'size', 'nc', 'overlap', 'lyrics', 'subbed'])} ${audSel}`) : '';
   const entSel = rEnt ? sel(rEnt, `${scalars(rEnt.T, ['version', 'spoiler', 'nsfw'])} ${vidSel}`) : '';
   const thSel = sel(rTh, `${scalars(Th, ['type', 'sequence', 'slug'])} ${rSong ? `song{${songSel}}` : ''} ${entSel}`);
   const tName = await textField(A, 'name');
@@ -1028,7 +1081,10 @@ async function atPlan() {
       const songOf = so => so ? { title: pickText(so.title), artists: rArt ? items(so[rArt.name], rArt).map(x => ({ name: pickText(x.name) })) : rPerf ? items(so[rPerf.name], rPerf).map(p => ({ name: pickText(p.artist && p.artist.name) || pickText(p.as) || pickText(p.alias) })) : [] } : null;
       return items(raw).map(a => ({ _al: alId, name: pickText(a.name), slug: a.slug, year: a.year,
         animethemes: items(a[rTh.name], rTh).map(t => ({ type: t.type, sequence: t.sequence, slug: t.slug, song: songOf(t.song),
-          animethemeentries: rEnt ? items(t[rEnt.name], rEnt).map(e => ({ version: e.version, spoiler: e.spoiler, nsfw: e.nsfw, videos: rVid ? items(e[rVid.name], rVid) : [] })) : [] })) }));
+          animethemeentries: rEnt ? items(t[rEnt.name], rEnt).map(e => ({ version: e.version, spoiler: e.spoiler, nsfw: e.nsfw,
+            videos: rVid ? items(e[rVid.name], rVid).map(v => ({ ...v,
+              audio: audSel ? items(v[rAud.name], rAud).find(a => a?.link) : undefined
+            })) : [] })) : [] })) }));
     } };
   log('AT plan: ' + AT.query([1]).slice(0, 600));
   return AT;
@@ -1050,18 +1106,30 @@ async function themesFor(ids, st) {
   }
   return out;
 }
+const videoLink = v => v.link || (v.basename ? 'https://v.animethemes.moe/' + v.basename : null);
+const overlap = v => String(v.overlap || 'NONE').toUpperCase();
+const res = v => Number(v.resolution) || 720;
+function entryMedia(entry, preferred) {
+  const comparable = entry.videos.filter(v => overlap(v) === overlap(preferred));
+  const videos = comparable.filter(videoLink);
+  const haveSizes = videos.every(v => v.size > 0);
+  const smallest = videos.reduce((best, v) => (haveSizes ? v.size < best.size : res(v) < res(best)) ? v : best, preferred);
+  const tracks = comparable.map(v => v.audio).filter(a => a?.link);
+  const audio = tracks.reduce((best, a) => a.size > 0 && (!best?.size || a.size < best.size) ? a : best, preferred.audio?.link ? preferred.audio : tracks[0]);
+  return { link: videoLink(smallest), key: preferred.basename || basename(videoLink(preferred)), audio: audio?.link || null };
+}
 function pickVideo(entries) {
   let best = null, bs = 1e9;
   for (const e of entries) {
     const es = (e.spoiler ? 3 : 0) + (e.nsfw ? 3 : 0) + ((e.version || 1) - 1) * 1.5;
     for (const v of e.videos || []) {
-      const link = v.link || (v.basename ? 'https://v.animethemes.moe/' + v.basename : null);
-      if (!link) continue;
-      const sc = es + (v.overlap && String(v.overlap).toUpperCase() !== 'NONE' ? 2 : 0) + (v.lyrics ? 1 : 0) + (v.subbed ? 1 : 0) + (v.nc ? -0.3 : 0) + Math.abs((v.resolution || 720) - 720) / 400;
-      if (sc < bs) { bs = sc; best = { link, key: v.basename || link.split('/').pop(), audio: v.audio && !Array.isArray(v.audio) ? v.audio.link : null }; }
+      if (!videoLink(v)) continue;
+      const sc = es + (overlap(v) !== 'NONE' ? 2 : 0) + (v.lyrics ? 1 : 0) + (v.subbed ? 1 : 0) + (v.nc ? -0.3 : 0) + Math.abs(res(v) - 720) / 400;
+      if (sc < bs) { bs = sc; best = { entry: e, video: v }; }
     }
   }
-  return best;
+  // Keep the original key since it indexes quiz and review progress.
+  return best ? entryMedia(best.entry, best.video) : null;
 }
 function artistsOf(song) {
   if (!song) return [];
@@ -1082,7 +1150,7 @@ function candidatesFrom(a, m, pr, out) {
       st: (m.studios && m.studios.nodes && m.studios.nodes[0] && m.studios.nodes[0].name) || '', fm: m.format || '',
       sl: th.slug || ('OP' + seq), sq: seq, t: (th.song && th.song.title) || '(unknown title)',
       ar: arts.join(', ') || '(unknown artist)', arl: arts.map(x => x.toLowerCase()),
-      v: v.link, a: v.audio || undefined, page: a.slug ? 'https://animethemes.moe/anime/' + a.slug : '', pr, sc: pr + (seq - 1) * 120
+      v: v.link, a: v.audio, page: a.slug ? 'https://animethemes.moe/anime/' + a.slug : '', pr, sc: pr + (seq - 1) * 120
     });
   }
 }
@@ -1141,7 +1209,7 @@ async function diagnostics() {
     `songs: ${songs.length}, progress: ${Object.keys(prog).length}, at batch: ${atBatch}`,
     `canPlay webm vp9: "${video.canPlayType('video/webm; codecs="vp9, opus"')}" webm: "${video.canPlayType('video/webm')}"`,
     `canPlay ogg opus: "${audio.canPlayType('audio/ogg; codecs="opus"')}" vorbis: "${audio.canPlayType('audio/ogg; codecs="vorbis"')}" → audio mode ${OGG}`,
-    `audio download: ${JSON.stringify(corsState)}, saved: ${Object.keys(acIdx).length}, caches: ${hasCaches}, list from: ${(meta && meta.from) || 'built'}`
+    `audio playback: cached audio or direct stream, caches: ${hasCaches}, list from: ${(meta && meta.from) || 'built'}`
   ];
   try { const d = await anilist('{Page(perPage:1){media(type:ANIME,sort:POPULARITY_DESC){id title{romaji}}}}', {}); out.push('AniList OK ' + JSON.stringify(d).slice(0, 120)); }
   catch (e) { out.push('AniList FAIL ' + e.message); }
@@ -1154,9 +1222,22 @@ async function diagnostics() {
     out.push('AT normalized: ' + JSON.stringify(n && n.animethemes && n.animethemes.slice(0, 2)).slice(0, 700));
   } catch (e) { out.push('AT FAIL ' + e.message); }
   try {
-    const u = audioUrl(songs[0] || { v: 'https://v.animethemes.moe/ShingekiNoKyojin-OP1.webm' }); const t0 = Date.now();
-    const r = await fetch(u, { mode: 'cors', cache: 'no-store' }); const rd = r.body.getReader(); const c = await rd.read(); rd.cancel();
-    out.push(`audio test ${u}: ${r.status}, ${r.headers.get('Content-Length')} bytes, type ${r.headers.get('Content-Type')}, first chunk ${c.value ? c.value.length : 0} B in ${Date.now() - t0} ms`);
+    const sample = songs[0] || { k: 'ShingekiNoKyojin-OP1.webm' };
+    const url = sample.a || (await lookupMedia(sample))?.audio;
+    if (!url) throw new Error('AnimeThemes returned no audio link');
+    const probe = document.createElement('audio');
+    const elapsed = performance.now();
+    const duration = await new Promise((resolve, reject) => {
+      const finish = (callback, result) => {
+        clearTimeout(timeout); probe.removeAttribute('src'); probe.load(); callback(result);
+      };
+      const timeout = setTimeout(() => finish(reject, new Error('Audio metadata timed out')), 15000);
+      probe.onloadedmetadata = () => finish(resolve, probe.duration);
+      probe.onerror = () => finish(reject, new Error('Media error ' + probe.error?.code));
+      probe.preload = 'metadata';
+      probe.src = url;
+    });
+    out.push(`audio test ${url}: ${duration.toFixed(1)}s, ready in ${Math.round(performance.now() - elapsed)} ms`);
   } catch (e) { out.push('audio test FAIL ' + e.message); }
   if (songs[0]) out.push('sample song: ' + JSON.stringify(songs[0]).slice(0, 400));
   out.push('--- log ---', ...logLines.slice(-30));
