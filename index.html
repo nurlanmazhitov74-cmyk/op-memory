@@ -155,16 +155,29 @@ const LS = {
 };
 let songs = LS.get(K.songs, []);
 let meta = LS.get(K.meta, null);
-let prog = LS.get(K.prog, {});
+let profiles = LS.get('opm.profiles', [{ id: 'main', name: 'Main' }]);
+let profId = LS.get('opm.profile', 'main'); if (!profiles.find(p => p.id === profId)) profId = 'main';
+const pk = (base, id = profId) => id === 'main' ? base : base + '.' + id; // storage key for the active progress save
+let prog = LS.get(pk(K.prog), {});
+let excl = new Set(LS.get(pk('opm.excl'), []));   // songs excluded from Practice (per progress save)
 let settings = Object.assign({ names: 'en', newPerDay: 10, lesson: 10, randomStart: true, typed: true }, LS.get(K.set, {}));
 try { localStorage.removeItem('opm.noaudio'); localStorage.removeItem('opm.acidx'); localStorage.removeItem('opm.cors'); if (typeof caches !== 'undefined') caches.delete('opm-audio-v1'); } catch (e) {}
-let daily = LS.get(K.daily, { day: '', n: 0, r: 0 });
+let daily = LS.get(pk(K.daily), { day: '', n: 0, r: 0 });
 let byKey = new Map();
 function reindex() { byKey = new Map(songs.map(s => [s.k, s])); }
 reindex();
-const saveProg = () => LS.set(K.prog, prog);
+const saveProg = () => LS.set(pk(K.prog), prog);
+const saveExcl = () => LS.set(pk('opm.excl'), Array.from(excl));
 const saveSet = () => LS.set(K.set, settings);
-const saveDaily = () => LS.set(K.daily, daily);
+const saveDaily = () => LS.set(pk(K.daily), daily);
+const saveProfiles = () => { LS.set('opm.profiles', profiles); LS.set('opm.profile', profId); };
+const profName = () => (profiles.find(p => p.id === profId) || {}).name || 'Main';
+function switchProfile(id) {
+  profId = id; saveProfiles();
+  prog = LS.get(pk(K.prog), {}); daily = LS.get(pk(K.daily), { day: '', n: 0, r: 0 }); excl = new Set(LS.get(pk('opm.excl'), []));
+  L = null; R = null; P = null; LI = null;
+}
+function profileData(id) { return { id, name: (profiles.find(p => p.id === id) || {}).name, prog: LS.get(pk(K.prog, id), {}), daily: LS.get(pk(K.daily, id), null), excl: LS.get(pk('opm.excl', id), []) }; }
 const logLines = LS.get(K.log, []);
 function log(m) {
   const line = new Date().toISOString().slice(5, 19).replace('T', ' ') + ' ' + m;
@@ -242,6 +255,7 @@ const audio = document.createElement('audio'); audio.preload = 'auto';
 const OGG = !!(audio.canPlayType('audio/ogg; codecs="opus"') || audio.canPlayType('audio/ogg; codecs="vorbis"') || audio.canPlayType('audio/ogg'));
 const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const stats = { plays: 0, errors: 0, reconnects: 0, recovered: 0, gaveUp: 0 };
+let durs = LS.get('opm.dur', {}); // song -> real length in seconds, measured when it played to the end
 let seenFail = LS.get('opm.seenfail', []), seenOk = LS.get('opm.seenok', []);
 function note(list, key, k) { const i = list.indexOf(k); if (i >= 0) list.splice(i, 1); list.unshift(k); list.length = Math.min(list.length, 30); LS.set(key, list); }
 function audioUrl(s) {
@@ -253,12 +267,17 @@ let playStartedAt = 0, onEnded = null, curWrap = null, curBar = null, curSong = 
 let wantPlay = false, lastPos = 0, tries = 0, recovering = false, lastProgressAt = 0, lastProgressPos = -1, retryT = null;
 const fmt = t => { t = Math.max(0, Math.floor(t || 0)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
 const isSilent = () => String(audio.src).startsWith('data:');
+function realDur() {
+  if (curSong && durs[curSong.k]) return Math.max(durs[curSong.k], audio.currentTime || 0);
+  const d = audio.duration; return isFinite(d) && d > 0 ? Math.max(d, audio.currentTime || 0) : NaN;
+}
+const durText = d => (curSong && durs[curSong.k] ? '' : '~') + fmt(d);
 function updBar() {
   if (!curBar) return;
-  const d = audio.duration, c = audio.currentTime;
+  const d = realDur(), c = audio.currentTime;
   curBar.querySelector('[data-c=pp]').textContent = wantPlay ? '❚❚' : '▶';
   const sk = curBar.querySelector('.sk'); if (!sk.dataset.drag && isFinite(d) && d > 0) sk.value = Math.round(c / d * 1000);
-  curBar.querySelector('.tm').textContent = fmt(c) + (isFinite(d) && d > 0 ? ' / ' + fmt(d) : '');
+  curBar.querySelector('.tm').textContent = fmt(c) + (isFinite(d) && d > 0 ? ' / ' + durText(d) : '');
 }
 function setStatus(t) { if (!curWrap) return; const l = curWrap.querySelector('.ld'); if (l) l.innerHTML = t; curWrap.classList.toggle('loading', !!t); }
 audio.addEventListener('playing', () => {
@@ -276,7 +295,7 @@ audio.addEventListener('timeupdate', () => {
   if (audio.currentTime !== lastProgressPos) { lastProgressPos = audio.currentTime; lastProgressAt = Date.now(); }
   updBar();
 });
-audio.addEventListener('ended', () => { if (isSilent()) return; wantPlay = false; updBar(); if (onEnded) onEnded(); });
+audio.addEventListener('ended', () => { if (isSilent()) return; if (curSong && audio.currentTime > 5) { durs[curSong.k] = +audio.currentTime.toFixed(1); LS.set('opm.dur', durs); } wantPlay = false; updBar(); if (onEnded) onEnded(); });
 for (const ev of ['play', 'pause', 'durationchange']) audio.addEventListener(ev, () => { if (!isSilent()) updBar(); });
 audio.addEventListener('error', () => {
   if (isSilent() || !curSong) return;
@@ -339,8 +358,8 @@ function mountPlayer(container, s, opts = {}) {
   bar.querySelector('[data-c=rs]').onclick = restart;
   bar.querySelector('[data-c=pp]').onclick = () => { if (wantPlay) { wantPlay = false; audio.pause(); clearTimeout(retryT); if (recovering) { recovering = false; setStatus(''); } updBar(); } else tryPlay(); };
   const sk = bar.querySelector('.sk');
-  sk.oninput = () => { sk.dataset.drag = 1; const d = audio.duration; if (isFinite(d) && d > 0) bar.querySelector('.tm').textContent = fmt(sk.value / 1000 * d) + ' / ' + fmt(d); };
-  sk.onchange = () => { delete sk.dataset.drag; const d = audio.duration; if (isFinite(d) && d > 0) { lastPos = sk.value / 1000 * d; try { audio.currentTime = lastPos; } catch (e) {} } };
+  sk.oninput = () => { sk.dataset.drag = 1; const d = realDur(); if (isFinite(d) && d > 0) bar.querySelector('.tm').textContent = fmt(sk.value / 1000 * d) + ' / ' + durText(d); };
+  sk.onchange = () => { delete sk.dataset.drag; const d = realDur(); if (isFinite(d) && d > 0) { lastPos = Math.min(sk.value / 1000 * d, d - 0.5); try { audio.currentTime = lastPos; } catch (e) {} } };
   w.querySelector('.tap').onclick = () => tryPlay();
   curUrl = audioUrl(s);
   if (audio.getAttribute('src') && audio.getAttribute('src').split('?')[0] === curUrl && !audio.error) { try { audio.currentTime = start; } catch (e) {} }
@@ -435,6 +454,7 @@ function renderQuestion(s, variant, typed, onGrade, onNext, opt = {}) {
     $('#after').innerHTML = `<div class="result ${ok ? 'ok' : 'bad'}">${ok ? (ms < 6000 ? '✓ Correct, and quick' : '✓ Correct') : '✗ ' + (note || 'Not this time')}</div>
       ${infoBlock(s)}${connections(s)}<button class="btn" id="next">Next</button>`;
     $('#next').onclick = onNext;
+    if (opt.after) opt.after($('#after'));
     $('#after').scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
   if (typed) {
@@ -480,14 +500,14 @@ let view = 'today';
 function go(v) {
   stopPlayer();
   view = v;
-  document.body.classList.toggle('session', v === 'learn' || v === 'review');
+  document.body.classList.toggle('session', v === 'learn' || v === 'review' || (v === 'practice' && P && P.running));
   render();
   window.scrollTo(0, 0);
 }
 function render() {
   $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.v === view));
   if (!songs.length && view !== 'settings') return renderSetup();
-  ({ lab: renderLab, today: renderToday, learn: renderLearn, review: renderReview, listen: renderListen, library: renderLibrary, settings: renderSettings })[view]();
+  ({ lab: renderLab, practice: renderPractice, today: renderToday, learn: renderLearn, review: renderReview, listen: renderListen, library: renderLibrary, settings: renderSettings })[view]();
 }
 $$('#tabs button').forEach(b => b.onclick = () => go(b.dataset.v));
 
@@ -498,7 +518,7 @@ function renderToday() {
   const learned = learnedList().length, known = learnedList().filter(s => prog[s.k].ivl >= MATURE).length;
   const left = Math.max(0, settings.newPerDay - t.n);
   const n = Math.min(settings.lesson, fresh, left || settings.lesson);
-  app.innerHTML = `<h1>Today</h1>
+  app.innerHTML = `<h1>Today</h1>${profiles.length > 1 ? `<div class="small mut" style="margin:-10px 0 12px">Progress save: <b>${esc(profName())}</b></div>` : ''}
     <div class="stats"><div class="stat"><b>${due}</b><span>due</span></div><div class="stat"><b>${learned}</b><span>learned</span></div><div class="stat"><b>${known}</b><span>known well</span></div></div>
     <div class="card">
       <div class="small mut">${learned} of ${songs.length} openings learned</div>
@@ -509,6 +529,8 @@ function renderToday() {
         : `<button class="btn sec" id="learn">Daily limit reached · learn more anyway</button>`)
         : '<div class="small mut" style="margin-top:10px">You have started every song in the list.</div>'}
     </div>
+    <div class="card"><div class="small mut">Test yourself any time. Doesn’t change your review schedule.</div>
+      <button class="btn sec" id="prac">Practice</button></div>
     ${t.r ? `<div class="small mut" style="text-align:center">${t.r} reviews done today</div>` : ''}
     ${learned === 0 ? `<h2>How this works</h2><ul class="tips">
       <li><b>Learn</b>: watch each new opening with its anime, song title and artist, then a quick check on that batch.</li>
@@ -517,6 +539,7 @@ function renderToday() {
       <li>Your progress stays on this phone. Use Settings → Backup now and then.</li></ul>` : ''}`;
   if ($('#rev')) $('#rev').onclick = startReview;
   if ($('#learn')) $('#learn').onclick = startLesson;
+  $('#prac').onclick = () => { P = null; go('practice'); };
 }
 
 /* ============ Learn (new songs) ============ */
@@ -525,8 +548,10 @@ function startLesson() {
   const items = newList().slice(0, settings.lesson);
   if (!items.length) return;
   L = { items, i: 0, phase: 'intro', queue: [], done: 0, quitArm: false };
+  if (settings.skipIntro) toCheck();
   go('learn');
 }
+function toCheck() { L.phase = 'check'; L.queue = shuffle(L.items.map(x => x.k)); L.total = L.queue.length; }
 function quitLesson() {
   if (L && L.phase !== 'done' && !L.quitArm) { L.quitArm = true; $('#quit').textContent = 'Quit? Tap again'; toast('This lesson won’t be saved'); return; }
   L = null; go('today');
@@ -538,17 +563,18 @@ function renderLearn() {
     app.innerHTML = topbar(`New ${L.i + 1}/${L.items.length}`, L.i / L.items.length * 50) + `<div id="pl"></div>${infoBlock(s)}${connections(s)}
       <div class="small mut" style="margin:4px 2px 0">Let the opening play. Look at the title and artist while you listen.${s.page ? ` <a href="${esc(s.page)}" target="_blank" rel="noopener">Watch the video on AnimeThemes</a>` : ''}</div>
       <div class="row"><button class="btn sec" id="prev" ${L.i ? '' : 'disabled'}>Back</button><button class="btn sec" id="rep">Replay</button></div>
-      <button class="btn" id="nx">${last ? 'Start the check' : 'Next song'}</button>`;
+      <button class="btn" id="nx">${last ? 'Start the check' : 'Next song'}</button>
+      ${last ? '' : '<button class="btn ghost" id="skip">Skip the rest, go to the check</button>'}`;
     $('#quit').onclick = quitLesson;
     mountPlayer($('#pl'), s);
     $('#rep').onclick = restart;
     $('#prev').onclick = () => { L.i--; L.quitArm = false; renderLearn(); window.scrollTo(0, 0); };
     $('#nx').onclick = () => {
       L.quitArm = false;
-      if (last) { L.phase = 'check'; L.queue = shuffle(L.items.map(x => x.k)); L.total = L.queue.length; }
-      else L.i++;
+      if (last) toCheck(); else L.i++;
       renderLearn(); window.scrollTo(0, 0);
     };
+    if ($('#skip')) $('#skip').onclick = () => { L.quitArm = false; toCheck(); renderLearn(); window.scrollTo(0, 0); };
   } else if (L.phase === 'check') {
     if (!L.queue.length) return finishLesson();
     const s = byKey.get(L.queue[0]);
@@ -614,6 +640,72 @@ function renderReview() {
   });
 }
 
+
+/* ============ Practice (any time, shuffled, no effect on the review schedule) ============ */
+let P = null;
+function practicePool(kind) {
+  let pool = kind === 'all' ? songs.slice() : kind === 'hard' ? learnedList().filter(s => (prog[s.k].lap || 0) >= 2 || (prog[s.k].dm || 0) >= 2) : learnedList();
+  return pool.filter(s => !excl.has(s.k));
+}
+function renderPractice() {
+  if (P && P.running) return renderPracticeQ();
+  const pr = Object.assign({ pool: 'learned', count: 20, typed: false, details: false, rand: false }, LS.get('opm.prac', {}));
+  const n = k => practicePool(k).length;
+  const sel = (id, val, opts) => `<select id="${id}">${opts.map(([v, l]) => `<option value="${v}" ${String(val) === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  const sw = (id, val) => `<label class="sw"><input type="checkbox" id="${id}" ${val ? 'checked' : ''}><span></span></label>`;
+  app.innerHTML = `<div class="topbar"><button class="x" id="back">‹ Today</button></div><h1>Practice</h1>
+    <div class="small mut" style="margin:-8px 0 12px">Shuffled, as often as you like. Your review schedule isn’t touched.</div>
+    <div class="card">
+      <div class="set"><div>Songs</div>${sel('pp', pr.pool, [['learned', `Learned (${n('learned')})`], ['hard', `Ones you keep missing (${n('hard')})`], ['all', `All songs (${n('all')})`]])}</div>
+      <div class="set"><div>How many</div>${sel('pc', pr.count, [[10, 10], [20, 20], [50, 50], [100, 100], [0, 'All of them']])}</div>
+      <div class="set"><div>Type the answers<div class="tiny mut">Instead of multiple choice</div></div>${sw('pt', pr.typed)}</div>
+      <div class="set"><div>Also ask song titles and artists</div>${sw('pd', pr.details)}</div>
+      <div class="set"><div>Start at a random point in the song</div>${sw('pr', pr.rand)}</div>
+    </div>
+    ${P && P.result ? P.result : ''}
+    <button class="btn" id="go">Start</button>
+    ${excl.size ? `<div class="tiny mut" style="text-align:center;margin-top:8px">${excl.size} song${excl.size > 1 ? 's' : ''} excluded from Practice (Library → “Not in practice”)</div>` : ''}`;
+  $('#back').onclick = () => { P = null; go('today'); };
+  if ($('#again')) $('#again').onclick = () => startPractice(P.missed.slice(), P.opt);
+  $('#go').onclick = () => {
+    const o = { pool: $('#pp').value, count: +$('#pc').value, typed: $('#pt').checked, details: $('#pd').checked, rand: $('#pr').checked };
+    LS.set('opm.prac', o);
+    let list = shuffle(practicePool(o.pool)); if (o.count) list = list.slice(0, o.count);
+    if (!list.length) return toast('No songs to practice with these settings');
+    startPractice(list.map(s => s.k), o);
+  };
+}
+function startPractice(keys, opt) {
+  P = { running: true, queue: shuffle(keys), total: keys.length, done: 0, ok: 0, missed: [], opt };
+  go('practice');
+}
+function endPractice() {
+  const pct = P.done ? Math.round(P.ok / P.done * 100) : 0;
+  P.running = false;
+  P.result = `<div class="card"><b>Last round:</b> ${P.ok} of ${P.done} right (${pct}%).
+    ${P.missed.length ? `<div class="small mut" style="margin-top:6px">Missed: ${P.missed.slice(0, 12).map(k => esc(nm(byKey.get(k)))).join(', ')}${P.missed.length > 12 ? '…' : ''}</div><button class="btn sec" id="again">Practice the ${P.missed.length} missed again</button>` : ''}</div>`;
+  go('practice');
+}
+function renderPracticeQ() {
+  if (!P.queue.length) return endPractice();
+  const s = byKey.get(P.queue[0]);
+  if (!s) { P.queue.shift(); return renderPracticeQ(); }
+  let variant = 'anime';
+  if (P.opt.details) { const r = Math.random(); if (r < 0.25) variant = 'title'; else if (r < 0.5) variant = 'artist'; }
+  const start = P.opt.rand ? 10 + Math.floor(Math.random() * 50) : 0;
+  renderQuestion(s, variant, P.opt.typed && variant === 'anime', ok => {
+    P.queue.shift(); P.done++;
+    if (ok) P.ok++; else if (!P.missed.includes(s.k)) P.missed.push(s.k);
+  }, () => { renderPracticeQ(); window.scrollTo(0, 0); }, {
+    label: `${P.done + 1}/${P.total} · ${P.ok} right`, progress: P.done / P.total * 100, start,
+    onQuit: () => { stopPlayer(); endPractice(); },
+    after: box => {
+      box.insertAdjacentHTML('beforeend', `<button class="btn ghost" id="exq">${excl.has(s.k) ? 'Excluded from Practice · undo' : 'Exclude this song from Practice'}</button>`);
+      $('#exq').onclick = () => { if (excl.has(s.k)) excl.delete(s.k); else excl.add(s.k); saveExcl(); $('#exq').textContent = excl.has(s.k) ? 'Excluded from Practice · undo' : 'Exclude this song from Practice'; };
+    }
+  });
+}
+
 /* ============ Listen ============ */
 let LI = null;
 function renderListen() {
@@ -664,18 +756,18 @@ function renderLibrary() {
     <div class="card"><div class="small mut">Reviews coming up</div>
       <div class="bars">${forecast.map((n, d) => `<div>${n}<i style="height:${n / fmax * 60}px"></i>${lbl(d)}</div>`).join('')}</div></div>
     <input type="search" id="q" placeholder="Search anime, song or artist" value="${esc(libQuery)}">
-    <div class="chips">${[['all', 'All'], ['learn', 'Learning'], ['mature', 'Known'], ['hard', 'Struggling'], ['new', 'New']].map(([k, l]) => `<button data-f="${k}" class="${libFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="chips">${[['all', 'All'], ['learn', 'Learning'], ['mature', 'Known'], ['hard', 'Struggling'], ['new', 'New'], ['excl', 'Not in practice']].map(([k, l]) => `<button data-f="${k}" class="${libFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     <div class="list" id="list"></div>`;
   const draw = () => {
     const q = norm(libQuery);
-    let list = songs.filter(s => libFilter === 'all' || status(s)[0] === libFilter);
+    let list = songs.filter(s => libFilter === 'all' || (libFilter === 'excl' ? excl.has(s.k) : status(s)[0] === libFilter));
     if (q) list = list.filter(s => [s.ro, s.en, s.t, s.ar, ...(s.syn || [])].some(x => norm(x).includes(q)));
     list.sort((a, b) => a.r - b.r);
     $('#list').innerHTML = `<div class="tiny mut" style="margin:6px 0">${list.length} songs</div>` + list.slice(0, libShow).map(s => {
       const [k, l] = status(s);
       return `<div class="item" data-k="${esc(s.k)}"><img loading="lazy" src="${esc(s.cov)}" alt="" onerror="this.style.visibility='hidden'"><div class="t">
         <div><b>${esc(nm(s))}</b></div><div class="small">${esc(s.sl)} · ${esc(s.t)}</div><div class="small mut">${esc(s.ar)}</div></div>
-        <span class="chip ${k}">${l}</span></div>`;
+        <span class="chip ${k}">${l}</span>${excl.has(s.k) ? '<span class="chip" style="margin-left:4px">✕ practice</span>' : ''}</div>`;
     }).join('') + (list.length > libShow ? '<button class="btn sec" id="more">Show more</button>' : '');
     $$('#list .item').forEach(el => el.onclick = () => openSheet(byKey.get(el.dataset.k)));
     if ($('#more')) $('#more').onclick = () => { libShow += 200; draw(); };
@@ -689,12 +781,14 @@ function openSheet(s) {
   const stats = c ? `<div class="card small"><div class="row"><div>Next review<br><b>${new Date(c.due).toLocaleDateString()}</b></div><div>Interval<br><b>${c.ivl} day${c.ivl === 1 ? '' : 's'}</b></div><div>Misses<br><b>${c.lap || 0}</b></div></div></div>` : '';
   sh.innerHTML = `<div class="bg"></div><div class="body"><div id="spl"></div>${infoBlock(s)}${stats}${connections(s)}
     <div class="tiny mut" style="margin:4px 2px">Popularity rank #${s.r}</div>
+    <button class="btn sec" id="exc">${excl.has(s.k) ? 'Include in Practice again' : 'Exclude from Practice'}</button>
     ${c ? '<button class="btn danger" id="forget">Forget (learn it again from scratch)</button>' : ''}
     <button class="btn sec" id="close">Close</button></div>`;
   sh.classList.add('open');
   mountPlayer($('#spl'), s);
   const close = () => { stopPlayer(); sh.classList.remove('open'); sh.innerHTML = ''; };
   $('.bg', sh).onclick = close; $('#close').onclick = close;
+  $('#exc').onclick = () => { if (excl.has(s.k)) excl.delete(s.k); else excl.add(s.k); saveExcl(); $('#exc').textContent = excl.has(s.k) ? 'Include in Practice again' : 'Exclude from Practice'; if (view === 'library') render(); };
   if ($('#forget')) $('#forget').onclick = e => {
     if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again to confirm'; return; }
     delete prog[s.k]; saveProg(); close(); render();
@@ -709,13 +803,18 @@ function renderSettings() {
     <div class="card">
       <div class="set"><div>Anime names</div>${sel('names', settings.names, [['en', 'English'], ['ro', 'Romaji']])}</div>
       <div class="set"><div>New openings per day</div>${sel('npd', settings.newPerDay, [[5, 5], [10, 10], [15, 15], [20, 20], [30, 30], [50, 50]])}</div>
-      <div class="set"><div>Songs per lesson</div>${sel('les', settings.lesson, [[5, 5], [8, 8], [10, 10], [15, 15]])}</div>
+      <div class="set"><div>Songs per lesson</div>${sel('les', settings.lesson, [[5, 5], [8, 8], [10, 10], [15, 15], [20, 20], [30, 30]])}</div>
+      <div class="set"><div>Skip the listening part of lessons<div class="tiny mut">Go straight to the check. For songs you already know</div></div>${sw('ski', settings.skipIntro)}</div>
       <div class="set"><div>Start well-known songs mid-way<div class="tiny mut">Like a quiz that picks a random part</div></div>${sw('rs', settings.randomStart)}</div>
       <div class="set"><div>Type the name for well-known songs<div class="tiny mut">Instead of multiple choice, after ~2 weeks</div></div>${sw('ty', settings.typed)}</div>
     </div>
+    <h2>Progress saves</h2>
+    <div class="card"><div class="small mut">Separate progress, e.g. to start over without losing your main one. Each save has its own progress and its own Practice exclusions; settings and the song list are shared.</div>
+      <div id="profs"></div>
+      <div class="row"><button class="btn sec" id="pnew">New empty save</button><button class="btn sec" id="pdup">Copy this one</button></div></div>
     <h2>Backup</h2>
     <div class="card"><div class="small mut">Progress is stored only in this browser. Copy a backup into Notes now and then.</div>
-      <button class="btn sec" id="bk">Copy backup</button>
+      <button class="btn sec" id="bk">Copy backup (all progress saves)</button>
       <textarea id="bkt" placeholder="Paste a backup here to restore it" style="margin-top:10px"></textarea>
       <button class="btn sec" id="rst">Restore from pasted backup</button></div>
     <h2>Song list</h2>
@@ -729,10 +828,11 @@ function renderSettings() {
     <div class="card"><div class="small mut">If something breaks, run this and paste the result to Claude.</div>
       <button class="btn sec" id="dg">Run diagnostics</button><div id="dgo"></div>
       <button class="btn sec" id="lab">Audio lab: test why some songs won\u2019t play</button>
-      <button class="btn danger" id="wipe">Reset all progress</button></div>`;
+      <button class="btn danger" id="wipe">Reset progress of this save</button></div>`;
   $('#names').onchange = e => { settings.names = e.target.value; allNames = null; saveSet(); };
   $('#npd').onchange = e => { settings.newPerDay = +e.target.value; saveSet(); };
   $('#les').onchange = e => { settings.lesson = +e.target.value; saveSet(); };
+  $('#ski').onchange = e => { settings.skipIntro = e.target.checked; saveSet(); };
   $('#sv').onclick = saveSongsFile;
   $('#fx').onclick = async () => {
     $('#fx').disabled = true;
@@ -744,14 +844,48 @@ function renderSettings() {
 
   $('#rs').onchange = e => { settings.randomStart = e.target.checked; saveSet(); };
   $('#ty').onchange = e => { settings.typed = e.target.checked; saveSet(); };
-  $('#bk').onclick = () => copyText(JSON.stringify({ app: 'opmemory', v: 1, at: Date.now(), prog, settings, daily }), 'Backup copied');
+  const drawProfs = () => {
+    $('#profs').innerHTML = profiles.map(p => {
+      const n = Object.keys(LS.get(pk(K.prog, p.id), {})).length;
+      return `<div class="set"><div><b>${esc(p.name)}</b>${p.id === profId ? ' <span class="chip mature">active</span>' : ''}<div class="tiny mut">${n} songs learned</div></div>
+        <div style="display:flex;gap:6px">${p.id === profId ? '' : `<button class="x" data-use="${p.id}">Use</button>`}<button class="x" data-ren="${p.id}">Rename</button>${p.id === 'main' || p.id === profId ? '' : `<button class="x" data-del="${p.id}" style="color:var(--bad)">Delete</button>`}</div></div>`;
+    }).join('');
+    $$('[data-use]').forEach(b => b.onclick = () => { switchProfile(b.dataset.use); toast('Switched to ' + profName()); render(); });
+    $$('[data-ren]').forEach(b => b.onclick = () => {
+      const p = profiles.find(x => x.id === b.dataset.ren); const row = b.closest('.set');
+      row.innerHTML = `<input type="text" value="${esc(p.name)}" style="flex:1"><button class="x">Save</button>`;
+      const inp = row.querySelector('input'); inp.focus();
+      row.querySelector('button').onclick = () => { p.name = inp.value.trim() || p.name; saveProfiles(); drawProfs(); };
+    });
+    $$('[data-del]').forEach(b => b.onclick = () => {
+      if (!b.dataset.arm) { b.dataset.arm = 1; b.textContent = 'Sure?'; return; }
+      const id = b.dataset.del; profiles = profiles.filter(p => p.id !== id); saveProfiles();
+      for (const base of [K.prog, K.daily, 'opm.excl']) try { localStorage.removeItem(pk(base, id)); } catch (e) {}
+      drawProfs();
+    });
+  };
+  drawProfs();
+  const newProf = copy => {
+    const id = 'p' + Date.now().toString(36);
+    profiles.push({ id, name: copy ? profName() + ' (copy)' : 'Save ' + profiles.length });
+    if (copy) { LS.set(pk(K.prog, id), prog); LS.set(pk('opm.excl', id), Array.from(excl)); }
+    switchProfile(id); toast('Now using ' + profName()); render();
+  };
+  $('#pnew').onclick = () => newProf(false);
+  $('#pdup').onclick = () => newProf(true);
+  $('#bk').onclick = () => copyText(JSON.stringify({ app: 'opmemory', v: 2, at: Date.now(), settings, active: profId, profiles: profiles.map(p => profileData(p.id)) }), 'Backup copied');
   $('#rst').onclick = () => {
     try {
       const b = JSON.parse($('#bkt').value.trim());
-      if (b.app !== 'opmemory' || !b.prog) throw new Error('not an OP Memory backup');
-      prog = b.prog; saveProg();
+      if (b.app !== 'opmemory' || !(b.prog || b.profiles)) throw new Error('not an OP Memory backup');
+      if (b.profiles) {
+        profiles = b.profiles.map(p => ({ id: p.id, name: p.name || p.id }));
+        if (!profiles.find(p => p.id === 'main')) profiles.unshift({ id: 'main', name: 'Main' });
+        for (const p of b.profiles) { LS.set(pk(K.prog, p.id), p.prog || {}); if (p.daily) LS.set(pk(K.daily, p.id), p.daily); LS.set(pk('opm.excl', p.id), p.excl || []); }
+        switchProfile(profiles.find(p => p.id === b.active) ? b.active : 'main');
+      } else { prog = b.prog; saveProg(); } // old single-save backup goes into the active save
       if (b.settings) { settings = Object.assign(settings, b.settings); saveSet(); }
-      toast(`Restored ${Object.keys(prog).length} songs`); render();
+      toast(`Restored (${profiles.length} save${profiles.length > 1 ? 's' : ''})`); render();
     } catch (e) { toast('Could not restore: ' + e.message); }
   };
   $('#rb').onclick = async () => {
@@ -768,8 +902,8 @@ function renderSettings() {
     $('#dg').disabled = false;
   };
   $('#wipe').onclick = e => {
-    if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again: this erases all progress'; return; }
-    prog = {}; saveProg(); daily = { day: '', n: 0, r: 0 }; saveDaily(); toast('Progress reset'); render();
+    if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again: erases progress of ' + profName(); return; }
+    prog = {}; saveProg(); daily = { day: '', n: 0, r: 0 }; saveDaily(); toast('Progress reset for ' + profName()); render();
   };
 }
 function copyText(t, msg) {
