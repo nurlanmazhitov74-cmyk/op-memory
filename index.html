@@ -263,6 +263,32 @@ function audioUrl(s) {
   return 'https://a.animethemes.moe/' + String(s.v || '').split('/').pop().replace(/\.webm$/i, '.ogg');
 }
 function prefetch() {} // nothing to prefetch: files can only be streamed
+/* Songs imported from Files (downloaded into Drive by the Apps Script) live in IndexedDB, keyed by audio file name.
+   IndexedDB is the browser's store for large data; it sits next to the app's progress but has no small size cap. */
+const localName = s => audioUrl(s).split('/').pop().split('?')[0];
+let ldbP = null;
+function ldb() {
+  if (!ldbP) ldbP = new Promise((res, rej) => {
+    const r = indexedDB.open('opm-audio', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('files');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  return ldbP;
+}
+function ltx(mode, fn) {
+  return ldb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction('files', mode), req = fn(tx.objectStore('files')); let out;
+    if (req) req.onsuccess = () => { out = req.result; };
+    tx.oncomplete = () => res(out); tx.onerror = tx.onabort = () => rej(tx.error || new Error('storage error'));
+  }));
+}
+const lget = k => ltx('readonly', st => st.get(k));
+const lput = (k, v) => ltx('readwrite', st => st.put(v, k));
+const lclear = () => ltx('readwrite', st => st.clear());
+let localSet = new Set(), localReady = false;
+try { ltx('readonly', st => st.getAllKeys()).then(ks => { localSet = new Set(ks); localReady = true; if (['library', 'settings', 'today'].includes(view)) render(); }, e => log('local store: ' + e.message)); } catch (e) { log('local store unavailable: ' + e.message); }
+const onPhone = s => localSet.has(localName(s));
+let curObj = null, curObjName = '', curLocal = false;
 let playStartedAt = 0, onEnded = null, curWrap = null, curBar = null, curSong = null, curUrl = '', mountId = 0, curStart = 0;
 let wantPlay = false, lastPos = 0, tries = 0, recovering = false, lastProgressAt = 0, lastProgressPos = -1, retryT = null;
 const fmt = t => { t = Math.max(0, Math.floor(t || 0)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
@@ -301,6 +327,7 @@ audio.addEventListener('error', () => {
   if (isSilent() || !curSong) return;
   stats.errors++;
   log(`audio error ${audio.error && audio.error.code}${audio.error && audio.error.message ? ' "' + audio.error.message + '"' : ''} ${curSong.k} at ${fmt(lastPos)}${wantPlay ? '' : ' (paused)'}`);
+  if (curLocal) { curLocal = false; log('phone copy failed, streaming instead'); setSource(curUrl, lastPos); if (wantPlay) tryPlay(); return; }
   if (lastPos < 0.5 && !playStartedAt) note(seenFail, 'opm.seenfail', curSong.k);
   scheduleRecover();
 });
@@ -362,9 +389,24 @@ function mountPlayer(container, s, opts = {}) {
   sk.onchange = () => { delete sk.dataset.drag; const d = realDur(); if (isFinite(d) && d > 0) { lastPos = Math.min(sk.value / 1000 * d, d - 0.5); try { audio.currentTime = lastPos; } catch (e) {} } };
   w.querySelector('.tap').onclick = () => tryPlay();
   curUrl = audioUrl(s);
-  if (audio.getAttribute('src') && audio.getAttribute('src').split('?')[0] === curUrl && !audio.error) { try { audio.currentTime = start; } catch (e) {} }
-  else setSource(curUrl, start);
-  tryPlay(); updBar();
+  const ln = localName(s);
+  const stream = () => {
+    curLocal = false;
+    if (audio.getAttribute('src') && audio.getAttribute('src').split('?')[0] === curUrl && !audio.error) { try { audio.currentTime = start; } catch (e) {} }
+    else setSource(curUrl, start);
+    tryPlay(); updBar();
+  };
+  if (localSet.has(ln)) {
+    if (curObj && curObjName === ln && audio.getAttribute('src') === curObj && !audio.error) { curLocal = true; try { audio.currentTime = start; } catch (e) {} tryPlay(); updBar(); }
+    else lget(ln).then(b => {
+      if (id !== mountId) return;
+      if (!b) { localSet.delete(ln); return stream(); }
+      if (curObj) URL.revokeObjectURL(curObj);
+      curObj = URL.createObjectURL(b instanceof Blob ? b : new Blob([b], { type: 'audio/ogg' })); curObjName = ln; curLocal = true;
+      log(`  playing phone copy ${ln}`);
+      setSource(curObj, start); tryPlay(); updBar();
+    }, e => { log('phone copy unreadable: ' + e.message); if (id === mountId) stream(); });
+  } else stream();
   return w;
 }
 function restart() { lastPos = curStart || 0; try { audio.currentTime = lastPos; } catch (e) {} tryPlay(); }
@@ -756,18 +798,18 @@ function renderLibrary() {
     <div class="card"><div class="small mut">Reviews coming up</div>
       <div class="bars">${forecast.map((n, d) => `<div>${n}<i style="height:${n / fmax * 60}px"></i>${lbl(d)}</div>`).join('')}</div></div>
     <input type="search" id="q" placeholder="Search anime, song or artist" value="${esc(libQuery)}">
-    <div class="chips">${[['all', 'All'], ['learn', 'Learning'], ['mature', 'Known'], ['hard', 'Struggling'], ['new', 'New'], ['excl', 'Not in practice']].map(([k, l]) => `<button data-f="${k}" class="${libFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="chips">${[['all', 'All'], ['learn', 'Learning'], ['mature', 'Known'], ['hard', 'Struggling'], ['new', 'New'], ['phone', 'On phone'], ['nophone', 'Not on phone'], ['excl', 'Not in practice']].map(([k, l]) => `<button data-f="${k}" class="${libFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     <div class="list" id="list"></div>`;
   const draw = () => {
     const q = norm(libQuery);
-    let list = songs.filter(s => libFilter === 'all' || (libFilter === 'excl' ? excl.has(s.k) : status(s)[0] === libFilter));
+    let list = songs.filter(s => libFilter === 'all' || (libFilter === 'excl' ? excl.has(s.k) : libFilter === 'phone' ? onPhone(s) : libFilter === 'nophone' ? !onPhone(s) : status(s)[0] === libFilter));
     if (q) list = list.filter(s => [s.ro, s.en, s.t, s.ar, ...(s.syn || [])].some(x => norm(x).includes(q)));
     list.sort((a, b) => a.r - b.r);
     $('#list').innerHTML = `<div class="tiny mut" style="margin:6px 0">${list.length} songs</div>` + list.slice(0, libShow).map(s => {
       const [k, l] = status(s);
       return `<div class="item" data-k="${esc(s.k)}"><img loading="lazy" src="${esc(s.cov)}" alt="" onerror="this.style.visibility='hidden'"><div class="t">
         <div><b>${esc(nm(s))}</b></div><div class="small">${esc(s.sl)} · ${esc(s.t)}</div><div class="small mut">${esc(s.ar)}</div></div>
-        <span class="chip ${k}">${l}</span>${excl.has(s.k) ? '<span class="chip" style="margin-left:4px">✕ practice</span>' : ''}</div>`;
+        <span class="chip ${k}">${l}</span>${excl.has(s.k) ? '<span class="chip" style="margin-left:4px">✕ practice</span>' : ''}${onPhone(s) ? '<span class="chip" style="margin-left:4px" title="On this phone">📱</span>' : ''}</div>`;
     }).join('') + (list.length > libShow ? '<button class="btn sec" id="more">Show more</button>' : '');
     $$('#list .item').forEach(el => el.onclick = () => openSheet(byKey.get(el.dataset.k)));
     if ($('#more')) $('#more').onclick = () => { libShow += 200; draw(); };
@@ -817,6 +859,13 @@ function renderSettings() {
       <button class="btn sec" id="bk">Copy backup (all progress saves)</button>
       <textarea id="bkt" placeholder="Paste a backup here to restore it" style="margin-top:10px"></textarea>
       <button class="btn sec" id="rst">Restore from pasted backup</button></div>
+    <h2>Songs on this phone</h2>
+    <div class="card"><div class="small mut" id="lst">${localReady ? `${songs.filter(onPhone).length} of ${songs.length} songs are on this phone and play without streaming.` : 'Checking…'}</div>
+      <input type="file" id="imf" multiple accept=".ogg,audio/ogg" style="display:none">
+      <button class="btn sec" id="imp">Import songs from Files</button>
+      <div class="tiny mut" style="margin-top:6px">Pick the .ogg files the Drive script downloaded (select all in the folder). The app keeps its own copy, so you can delete them from Files afterwards. Files that don\u2019t match a song are skipped.</div>
+      <div id="imo"></div>
+      <button class="btn danger" id="ldel">Delete songs stored on this phone</button></div>
     <h2>Song list</h2>
     <div class="card"><div class="small mut">${songs.length} openings${meta ? ', built ' + new Date(meta.built).toLocaleDateString() : ''}. Rebuilding refreshes the top 1000 ranking and keeps your progress.</div>
       <button class="btn sec" id="fx">Update audio links from AnimeThemes</button><div class="small mut" id="fxs" style="margin-top:6px">${needsAudioLinks().length ? needsAudioLinks().length + ' songs still use a guessed audio link.' : 'All songs have their real audio link' + (meta && meta.audioFixed ? ' (updated ' + new Date(meta.audioFixed).toLocaleDateString() + ')' : '') + '.'}</div>
@@ -834,6 +883,32 @@ function renderSettings() {
   $('#les').onchange = e => { settings.lesson = +e.target.value; saveSet(); };
   $('#ski').onchange = e => { settings.skipIntro = e.target.checked; saveSet(); };
   $('#sv').onclick = saveSongsFile;
+  (async () => { try { const e = await navigator.storage.estimate(); const el = $('#lst'); if (el && localReady) el.textContent += ` The app uses ${(e.usage / 1073741824).toFixed(2)} GB in total.`; } catch (e) {} })();
+  $('#imp').onclick = () => $('#imf').click();
+  $('#imf').onchange = async e => {
+    const files = Array.from(e.target.files || []); e.target.value = '';
+    if (!files.length) return;
+    const want = new Map(); for (const x of songs) want.set(localName(x), x);
+    let done = 0, added = 0; const skipped = [];
+    $('#imp').disabled = true;
+    const out = $('#imo');
+    for (const f of files) {
+      done++;
+      if (out) out.innerHTML = `<div class="small mut" style="margin-top:8px">Importing ${done}/${files.length}… (${added} added)</div>`;
+      if (!want.has(f.name)) { skipped.push(f.name); continue; }
+      try { const buf = await f.arrayBuffer(); await lput(f.name, new Blob([buf], { type: 'audio/ogg' })); localSet.add(f.name); added++; }
+      catch (er) { skipped.push(f.name + ' (' + er.message + ')'); log('import failed ' + f.name + ': ' + er.message); }
+    }
+    log(`imported ${added} of ${files.length} files`);
+    toast(`Imported ${added} song${added === 1 ? '' : 's'}`);
+    render();
+    const o2 = $('#imo');
+    if (o2 && skipped.length) o2.innerHTML = `<div class="small mut" style="margin-top:8px">Skipped ${skipped.length}: ${esc(skipped.slice(0, 20).join(', '))}${skipped.length > 20 ? '…' : ''}</div>`;
+  };
+  $('#ldel').onclick = async e => {
+    if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again to delete all stored songs'; return; }
+    try { await lclear(); } catch (er) {} localSet.clear(); toast('Stored songs deleted'); render();
+  };
   $('#fx').onclick = async () => {
     $('#fx').disabled = true;
     for (const s of songs) delete s.a; // recheck everything
@@ -1397,7 +1472,7 @@ async function diagnostics() {
     'OP Memory diagnostics ' + new Date().toISOString(), 'UA: ' + navigator.userAgent,
     `songs: ${songs.length}, progress: ${Object.keys(prog).length}, at batch: ${atBatch}`,
     `canPlay ogg opus: "${audio.canPlayType('audio/ogg; codecs="opus"')}" vorbis: "${audio.canPlayType('audio/ogg; codecs="vorbis"')}" → audio mode ${OGG}`,
-    `list from: ${(meta && meta.from) || 'built'}`
+    `list from: ${(meta && meta.from) || 'built'}, on phone: ${localSet.size}`
   ];
   try { const d = await anilist('{Page(perPage:1){media(type:ANIME,sort:POPULARITY_DESC){id title{romaji}}}}', {}); out.push('AniList OK ' + JSON.stringify(d).slice(0, 120)); }
   catch (e) { out.push('AniList FAIL ' + e.message); }
