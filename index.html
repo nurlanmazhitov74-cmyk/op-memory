@@ -242,6 +242,8 @@ const audio = document.createElement('audio'); audio.preload = 'auto';
 const OGG = !!(audio.canPlayType('audio/ogg; codecs="opus"') || audio.canPlayType('audio/ogg; codecs="vorbis"') || audio.canPlayType('audio/ogg'));
 const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const stats = { plays: 0, errors: 0, reconnects: 0, recovered: 0, gaveUp: 0 };
+let seenFail = LS.get('opm.seenfail', []), seenOk = LS.get('opm.seenok', []);
+function note(list, key, k) { const i = list.indexOf(k); if (i >= 0) list.splice(i, 1); list.unshift(k); list.length = Math.min(list.length, 30); LS.set(key, list); }
 function audioUrl(s) {
   if (s.a) return s.a;
   return 'https://a.animethemes.moe/' + String(s.v || '').split('/').pop().replace(/\.webm$/i, '.ogg');
@@ -249,14 +251,6 @@ function audioUrl(s) {
 function prefetch() {} // nothing to prefetch: files can only be streamed
 let playStartedAt = 0, onEnded = null, curWrap = null, curBar = null, curSong = null, curUrl = '', mountId = 0, curStart = 0;
 let wantPlay = false, lastPos = 0, tries = 0, recovering = false, lastProgressAt = 0, lastProgressPos = -1, retryT = null;
-// iOS lets a media element play from script only after it has been played once inside a tap: do that on the first tap.
-let unlocked = false;
-function unlock() {
-  if (unlocked) return; unlocked = true;
-  try { audio.src = SILENT; const p = audio.play(); if (p && p.then) p.then(() => { if (String(audio.src).startsWith('data:')) audio.pause(); }, () => { unlocked = false; }); } catch (e) { unlocked = false; }
-}
-document.addEventListener('touchend', unlock, true);
-document.addEventListener('click', unlock, true);
 const fmt = t => { t = Math.max(0, Math.floor(t || 0)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
 const isSilent = () => String(audio.src).startsWith('data:');
 function updBar() {
@@ -270,6 +264,7 @@ function setStatus(t) { if (!curWrap) return; const l = curWrap.querySelector('.
 audio.addEventListener('playing', () => {
   if (isSilent()) return;
   if (!playStartedAt) playStartedAt = Date.now();
+  if (curSong) note(seenOk, 'opm.seenok', curSong.k);
   if (recovering) { recovering = false; stats.recovered++; log(`recovered ${curSong && curSong.k} at ${fmt(audio.currentTime)}`); }
   tries = 0; setStatus('');
   if (curWrap) curWrap.classList.remove('needtap', 'buf', 'err');
@@ -286,7 +281,8 @@ for (const ev of ['play', 'pause', 'durationchange']) audio.addEventListener(ev,
 audio.addEventListener('error', () => {
   if (isSilent() || !curSong) return;
   stats.errors++;
-  log(`audio error ${audio.error && audio.error.code} ${curSong.k} at ${fmt(lastPos)}${wantPlay ? '' : ' (paused)'}`);
+  log(`audio error ${audio.error && audio.error.code}${audio.error && audio.error.message ? ' "' + audio.error.message + '"' : ''} ${curSong.k} at ${fmt(lastPos)}${wantPlay ? '' : ' (paused)'}`);
+  if (lastPos < 0.5 && !playStartedAt) note(seenFail, 'opm.seenfail', curSong.k);
   scheduleRecover();
 });
 // stall watchdog: playing was requested, but the position hasn't moved for a while
@@ -491,7 +487,7 @@ function go(v) {
 function render() {
   $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.v === view));
   if (!songs.length && view !== 'settings') return renderSetup();
-  ({ today: renderToday, learn: renderLearn, review: renderReview, listen: renderListen, library: renderLibrary, settings: renderSettings })[view]();
+  ({ lab: renderLab, today: renderToday, learn: renderLearn, review: renderReview, listen: renderListen, library: renderLibrary, settings: renderSettings })[view]();
 }
 $$('#tabs button').forEach(b => b.onclick = () => go(b.dataset.v));
 
@@ -731,6 +727,7 @@ function renderSettings() {
     <h2>Troubleshooting</h2>
     <div class="card"><div class="small mut">If something breaks, run this and paste the result to Claude.</div>
       <button class="btn sec" id="dg">Run diagnostics</button><div id="dgo"></div>
+      <button class="btn sec" id="lab">Audio lab: test why some songs won\u2019t play</button>
       <button class="btn danger" id="wipe">Reset all progress</button></div>`;
   $('#names').onchange = e => { settings.names = e.target.value; allNames = null; saveSet(); };
   $('#npd').onchange = e => { settings.newPerDay = +e.target.value; saveSet(); };
@@ -754,6 +751,7 @@ function renderSettings() {
     try { await runBuild($('#rbs')); toast('Song list rebuilt'); render(); }
     catch (e) { $('#rb').disabled = false; }
   };
+  $('#lab').onclick = () => go('lab');
   $('#dg').onclick = async () => {
     $('#dg').disabled = true; $('#dgo').innerHTML = '<div class="small mut" style="margin-top:8px">Running…</div>';
     const txt = await diagnostics();
@@ -969,7 +967,8 @@ async function atPlan() {
   const thSel = sel(rTh, `${scalars(Th, ['type', 'sequence', 'slug'])} ${rSong ? `song{${songSel}}` : ''} ${entSel}`);
   const tName = await textField(A, 'name');
   const aSel = `${tName ? tName.sel : ''} ${scalars(A, ['slug', 'year'])} ${thSel}`;
-  AT = { query: ids => `{${ids.map(id => `a${id}:findAnimeByExternalSite(site:${siteLit},${idArg.name}:${idLit(id)}){${aSel}}`).join(' ')}}`,
+  AT = { siteLit, idArgName: idArg.name, idLit, rTh, rEnt, rVid, rAud,
+    query: ids => `{${ids.map(id => `a${id}:findAnimeByExternalSite(site:${siteLit},${idArg.name}:${idLit(id)}){${aSel}}`).join(' ')}}`,
     norm: (raw, alId) => {
       const songOf = so => so ? { title: pickText(so.title), artists: rArt ? items(so[rArt.name], rArt).map(x => ({ name: pickText(x.name) })) : rPerf ? items(so[rPerf.name], rPerf).map(p => ({ name: pickText(p.artist && p.artist.name) || pickText(p.as) || pickText(p.alias) })) : [] } : null;
       return items(raw).map(a => ({ _al: alId, name: pickText(a.name), slug: a.slug, year: a.year,
@@ -1078,6 +1077,124 @@ async function buildSongs(st) {
   log(`built ${top.length} songs from ${al.length} anime, ${cands.length} candidates`);
   BC = null;
   st(`Done: ${top.length} openings`, 1);
+}
+
+
+/* ============ Audio lab ============
+   Not part of learning: runs many probes on chosen songs and produces one report, so problems can be
+   diagnosed from data instead of trial-and-error updates. */
+const LAB_FAIL = ['KimetsuNoYaiba-OP1.webm', 'JujutsuKaisen-OP1.webm', 'OnePiece-OP1.webm', 'ShingekiNoKyojinS2-OP1.webm', 'ChainsawMan-OP1.webm', 'MobPsycho100-OP1.webm'];
+const LAB_OK = ['ShingekiNoKyojin-OP1.webm', 'OnePiece-OP1-EN.webm', 'DeathNote-OP1.webm', 'BokuNoHeroAcademia-OP1-NCBD1080.webm'];
+let labOut = '';
+function renderLab() {
+  const fails = Array.from(new Set([...LAB_FAIL, ...seenFail])).slice(0, 10), oks = Array.from(new Set([...LAB_OK, ...seenOk])).slice(0, 5);
+  app.innerHTML = `<div class="topbar"><button class="x" id="back">‹ Settings</button></div><h1>Audio lab</h1>
+    <div class="card small">Tests each song below in several ways and asks AnimeThemes for everything it knows about the file. It takes a few minutes and uses some data (a few MB per song). Stay on this screen; you won’t hear anything, the tests are muted.</div>
+    <h2>Songs that fail</h2><textarea id="lf">${esc(fails.join('\n'))}</textarea>
+    <h2>Songs that play (for comparison)</h2><textarea id="lo">${esc(oks.join('\n'))}</textarea>
+    <div class="card" style="margin-top:12px">
+      <label class="set"><div>File details from the AnimeThemes API</div><label class="sw"><input type="checkbox" id="t_api" checked><span></span></label></label>
+      <label class="set"><div>Audio file in an audio player</div><label class="sw"><input type="checkbox" id="t_ogg" checked><span></span></label></label>
+      <label class="set"><div>Audio file, fresh request (skips cache)</div><label class="sw"><input type="checkbox" id="t_ogg2" checked><span></span></label></label>
+      <label class="set"><div>Video file in an audio player<div class="tiny mut">Uses more data</div></div><label class="sw"><input type="checkbox" id="t_wa" checked><span></span></label></label>
+      <label class="set"><div>Video file in a video player<div class="tiny mut">Uses more data</div></div><label class="sw"><input type="checkbox" id="t_wv" checked><span></span></label></label>
+      <label class="set"><div>Direct download test (fetch)</div><label class="sw"><input type="checkbox" id="t_fetch" checked><span></span></label></label>
+    </div>
+    <button class="btn" id="run">Run the lab</button>
+    <div id="lprog" class="small mut" style="margin-top:10px"></div>
+    <div id="lres">${labOut ? `<textarea readonly style="min-height:220px">${esc(labOut)}</textarea><button class="btn" id="lcopy">Copy report</button>` : ''}</div>`;
+  $('#back').onclick = () => go('settings');
+  if ($('#lcopy')) $('#lcopy').onclick = () => copyText(labOut, 'Report copied');
+  $('#run').onclick = () => {
+    stopPlayer();
+    const opt = {}; for (const k of ['api', 'ogg', 'ogg2', 'wa', 'wv', 'fetch']) opt[k] = $('#t_' + k).checked;
+    const parse = t => t.split(/\s+/).map(x => x.trim()).filter(Boolean);
+    // test elements are created and started inside this tap, so iOS lets them play later
+    const ae = document.createElement('audio'); ae.muted = true;
+    const ve = document.createElement('video'); ve.muted = true; ve.setAttribute('playsinline', ''); ve.style.cssText = 'position:fixed;width:2px;height:2px;opacity:0;pointer-events:none;bottom:0;left:0';
+    document.body.appendChild(ve);
+    for (const el of [ae, ve]) { try { el.src = SILENT; const p = el.play(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
+    $('#run').disabled = true;
+    runLab(parse($('#lf').value), parse($('#lo').value), opt, ae, ve).then(txt => {
+      labOut = txt; ve.remove();
+      if (view === 'lab') { renderLab(); $('#lres').scrollIntoView({ behavior: 'smooth' }); }
+    });
+  };
+}
+function probeMedia(el, src, ms = 15000) {
+  return new Promise(res => {
+    const t0 = performance.now(), r = { src: src.replace(/^https:\/\//, '') }; let done = false, to;
+    const T = () => Math.round(performance.now() - t0);
+    const ev = {
+      loadstart: () => { r.loadstart = T(); }, loadedmetadata: () => { r.meta = T(); }, canplay: () => { r.canplay = r.canplay || T(); },
+      playing: () => { r.playing = T(); setTimeout(() => { r.posAfter1500 = +el.currentTime.toFixed(2); fin('PLAYED'); }, 1500); },
+      stalled: () => { r.stalled = (r.stalled || 0) + 1; }, waiting: () => { r.waiting = (r.waiting || 0) + 1; }, suspend: () => { r.suspend = (r.suspend || 0) + 1; },
+      error: () => fin('ERROR')
+    };
+    const fin = outcome => {
+      if (done) return; done = true; clearTimeout(to);
+      r.outcome = outcome; r.ms = T();
+      r.duration = isFinite(el.duration) ? +el.duration.toFixed(1) : String(el.duration);
+      r.networkState = el.networkState; r.readyState = el.readyState;
+      try { r.buffered = Array.from({ length: el.buffered.length }, (_, i) => [+el.buffered.start(i).toFixed(1), +el.buffered.end(i).toFixed(1)]); } catch (e) {}
+      if (el.error) { r.errCode = el.error.code; r.errMsg = el.error.message || ''; }
+      for (const k in ev) el.removeEventListener(k, ev[k]);
+      try { el.pause(); el.removeAttribute('src'); el.load(); } catch (e) {}
+      res(r);
+    };
+    for (const k in ev) el.addEventListener(k, ev[k]);
+    to = setTimeout(() => fin('TIMEOUT'), ms);
+    try { el.src = src; const p = el.play(); if (p && p.catch) p.catch(e => { r.playRejected = e.name + ': ' + e.message; }); } catch (e) { r.threw = e.message; fin('THREW'); }
+  });
+}
+async function labApi(s) {
+  const plan = await atPlan();
+  const leafs = T => (T.fields || []).filter(f => LEAF(f.type) && !(f.args || []).some(a => a.type && a.type.kind === 'NON_NULL')).map(f => f.name).join(' ');
+  const vidInner = `${leafs(plan.rVid.T)} ${plan.rAud ? `${plan.rAud.name}{${leafs(plan.rAud.T)}}` : ''}`;
+  const q = `{a${s.aid}:findAnimeByExternalSite(site:${plan.siteLit},${plan.idArgName}:${plan.idLit(s.aid)}){ ${sel(plan.rTh, `slug ${sel(plan.rEnt, `version ${sel(plan.rVid, vidInner)}`)}`)} }}`;
+  const d = await atPost(q);
+  const vids = [];
+  for (const a of items(d['a' + s.aid])) for (const t of items(a[plan.rTh.name], plan.rTh)) for (const e of items(t[plan.rEnt.name], plan.rEnt)) for (const v of items(e[plan.rVid.name], plan.rVid)) vids.push(Object.assign({ theme: t.slug, version: e.version }, v));
+  const mine = vids.find(v => v.basename === s.k || String(v.link || '').endsWith('/' + s.k));
+  return { file: mine || null, otherVersionsOfThisTheme: vids.filter(v => v !== mine && mine && v.theme === mine.theme) };
+}
+async function runLab(failKeys, okKeys, opt, ae, ve) {
+  const out = ['OP Memory audio lab ' + new Date().toISOString(), 'UA: ' + navigator.userAgent,
+    `canPlayType ogg/opus "${ae.canPlayType('audio/ogg; codecs="opus"')}" ogg/vorbis "${ae.canPlayType('audio/ogg; codecs="vorbis"')}" ogg "${ae.canPlayType('audio/ogg')}" webm/opus(audio) "${ae.canPlayType('audio/webm; codecs="opus"')}" webm/vorbis(audio) "${ae.canPlayType('audio/webm; codecs="vorbis"')}" video webm vp9/opus "${ve.canPlayType('video/webm; codecs="vp9, opus"')}" vp8/vorbis "${ve.canPlayType('video/webm; codecs="vp8, vorbis"')}"`];
+  const progress = t => { const p = $('#lprog'); if (p) p.textContent = t; };
+  if (opt.api) {
+    try {
+      const plan = await atPlan();
+      const dump = T => (T.fields || []).map(f => f.name + ':' + (named(f.type).name || '?')).join(', ');
+      out.push('API Video type ' + plan.rVid.T.name + ': ' + dump(plan.rVid.T));
+      if (plan.rAud) out.push('API Audio type ' + plan.rAud.T.name + ': ' + dump(plan.rAud.T));
+    } catch (e) { out.push('API schema FAIL ' + e.message); }
+  }
+  const all = [...failKeys.map(k => ['FAILS', k]), ...okKeys.map(k => ['PLAYS', k])];
+  let n = 0;
+  for (const [group, k] of all) {
+    n++; const s = byKey.get(k);
+    out.push('', `=== [${group}] ${k} ===`);
+    if (!s) { out.push('not in the song list'); continue; }
+    out.push(`${nm(s)} ${s.sl} "${s.t}" — ${s.ar}`);
+    const ogg = audioUrl(s);
+    if (opt.api) { progress(`${n}/${all.length} ${k}: asking the API…`); try { out.push('api: ' + JSON.stringify(await labApi(s))); } catch (e) { out.push('api FAIL ' + e.message); } }
+    if (opt.ogg) { progress(`${n}/${all.length} ${k}: audio file…`); out.push('ogg in <audio>: ' + JSON.stringify(await probeMedia(ae, ogg))); }
+    if (opt.ogg2) { progress(`${n}/${all.length} ${k}: audio file, fresh request…`); out.push('ogg fresh in <audio>: ' + JSON.stringify(await probeMedia(ae, ogg + '?lab=' + Date.now()))); }
+    if (opt.wa) { progress(`${n}/${all.length} ${k}: video file in audio player…`); out.push('webm in <audio>: ' + JSON.stringify(await probeMedia(ae, s.v))); }
+    if (opt.wv) { progress(`${n}/${all.length} ${k}: video file in video player…`); out.push('webm in <video>: ' + JSON.stringify(await probeMedia(ve, s.v))); }
+    if (opt.fetch && n <= 2) {
+      for (const [label, init] of [['fetch cors', { mode: 'cors' }], ['fetch cors+Range', { mode: 'cors', headers: { Range: 'bytes=0-4095' } }], ['fetch no-cors', { mode: 'no-cors' }]]) {
+        const t0 = performance.now();
+        try { const r = await fetch(ogg + '?lab=' + Date.now(), init); out.push(`${label}: type ${r.type}, status ${r.status}, content-type ${r.headers.get('Content-Type')}, length ${r.headers.get('Content-Length')}, ${Math.round(performance.now() - t0)} ms`); try { r.body && r.body.cancel(); } catch (e) {} }
+        catch (e) { out.push(`${label}: FAIL ${e.name}: ${e.message} after ${Math.round(performance.now() - t0)} ms`); }
+      }
+    }
+    await sleep(500);
+  }
+  progress('Done.');
+  out.push('', '--- recent log ---', ...logLines.slice(-40));
+  return out.join('\n');
 }
 
 /* ============ diagnostics ============ */
