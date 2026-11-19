@@ -245,7 +245,7 @@ const stats = { plays: 0, errors: 0, reconnects: 0, recovered: 0, gaveUp: 0 };
 let seenFail = LS.get('opm.seenfail', []), seenOk = LS.get('opm.seenok', []);
 function note(list, key, k) { const i = list.indexOf(k); if (i >= 0) list.splice(i, 1); list.unshift(k); list.length = Math.min(list.length, 30); LS.set(key, list); }
 function audioUrl(s) {
-  if (s.a) return s.a;
+  if (s.a) return s.a; // the real link from the API (several versions often share one audio file with a different name)
   return 'https://a.animethemes.moe/' + String(s.v || '').split('/').pop().replace(/\.webm$/i, '.ogg');
 }
 function prefetch() {} // nothing to prefetch: files can only be streamed
@@ -720,6 +720,7 @@ function renderSettings() {
       <button class="btn sec" id="rst">Restore from pasted backup</button></div>
     <h2>Song list</h2>
     <div class="card"><div class="small mut">${songs.length} openings${meta ? ', built ' + new Date(meta.built).toLocaleDateString() : ''}. Rebuilding refreshes the top 1000 ranking and keeps your progress.</div>
+      <button class="btn sec" id="fx">Update audio links from AnimeThemes</button><div class="small mut" id="fxs" style="margin-top:6px">${needsAudioLinks().length ? needsAudioLinks().length + ' songs still use a guessed audio link.' : 'All songs have their real audio link' + (meta && meta.audioFixed ? ' (updated ' + new Date(meta.audioFixed).toLocaleDateString() + ')' : '') + '.'}</div>
       <button class="btn sec" id="sv">Save song list as a file</button>
       <div class="tiny mut" style="margin-top:6px">Upload the saved <b>songs.json</b> to your GitHub repo next to index.html. The app then loads the list from there and never needs to build it again.</div>
       <button class="btn sec" id="rb">Rebuild song list</button><div id="rbs"></div></div>
@@ -733,6 +734,13 @@ function renderSettings() {
   $('#npd').onchange = e => { settings.newPerDay = +e.target.value; saveSet(); };
   $('#les').onchange = e => { settings.lesson = +e.target.value; saveSet(); };
   $('#sv').onclick = saveSongsFile;
+  $('#fx').onclick = async () => {
+    $('#fx').disabled = true;
+    for (const s of songs) delete s.a; // recheck everything
+    try { const n = await fixAudioLinks(t => { const e = $('#fxs'); if (e) e.textContent = t; }); toast(`Done: ${n} links corrected`); }
+    catch (e) { toast('Failed: ' + e.message); }
+    if (view === 'settings') render();
+  };
 
   $('#rs').onchange = e => { settings.randomStart = e.target.checked; saveSet(); };
   $('#ty').onchange = e => { settings.typed = e.target.checked; saveSet(); };
@@ -767,6 +775,52 @@ function renderSettings() {
 function copyText(t, msg) {
   const fallback = () => { const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length); let ok = false; try { ok = document.execCommand('copy'); } catch (e) {} ta.remove(); toast(ok ? msg : 'Copy failed: select the text and copy it by hand'); };
   try { navigator.clipboard.writeText(t).then(() => toast(msg), fallback); } catch (e) { fallback(); }
+}
+
+/* ============ audio links ============
+   Lists built before the app asked the API for audio links only have a guessed link (video name → .ogg),
+   which is wrong whenever the audio file is named after another version. This asks the API for the real ones. */
+let fixing = null;
+function needsAudioLinks() { return songs.filter(s => !('a' in s)); }
+function fixAudioLinks(st) {
+  if (fixing) return fixing;
+  fixing = (async () => {
+    const plan = await atPlan();
+    const need = needsAudioLinks(); if (!need.length) return 0;
+    const byAid = new Map(); for (const s of need) { if (!byAid.has(s.aid)) byAid.set(s.aid, []); byAid.get(s.aid).push(s); }
+    const ids = Array.from(byAid.keys()); let fixed = 0, changed = 0;
+    for (let i = 0; i < ids.length;) {
+      const chunk = ids.slice(i, i + atBatch);
+      st && st(`Getting audio links… ${Math.min(i + chunk.length, ids.length)}/${ids.length} anime`);
+      let d;
+      try { d = await atPost(plan.query(chunk), st); }
+      catch (e) { if (e.gql && atBatch > 1) { atBatch = Math.max(1, Math.floor(atBatch / 2)); continue; } throw e; }
+      for (const id of chunk) {
+        const an = d && d['a' + id] ? plan.norm(d['a' + id], id)[0] : null;
+        for (const s of byAid.get(id)) {
+          const guess = audioUrl(s);
+          let link = '';
+          if (an) {
+            const th = (an.animethemes || []).find(t => t.slug === s.sl);
+            const vids = th ? (th.animethemeentries || []).flatMap(e => e.videos || []) : [];
+            const v = vids.find(x => x.basename === s.k && x.audio) || vids.find(x => x.audio);
+            const au = v && v.audio && (Array.isArray(v.audio) ? v.audio[0] : v.audio);
+            link = (au && au.link) || '';
+          }
+          s.a = link; fixed++;
+          if (link && link !== guess) changed++;
+        }
+      }
+      i += chunk.length;
+      if (i < ids.length) await sleep(800);
+    }
+    reindex(); meta = Object.assign({}, meta, { built: Date.now(), audioFixed: Date.now() });
+    LS.set(K.songs, songs); LS.set(K.meta, meta);
+    log(`audio links: checked ${fixed}, ${changed} differed from the guessed link`);
+    return changed;
+  })();
+  fixing.then(() => { fixing = null; }, e => { fixing = null; log('audio link update failed: ' + e.message); });
+  return fixing;
 }
 
 /* ============ song list file (songs.json in the repo) ============ */
@@ -1178,15 +1232,21 @@ async function runLab(failKeys, okKeys, opt, ae, ve) {
     if (!s) { out.push('not in the song list'); continue; }
     out.push(`${nm(s)} ${s.sl} "${s.t}" — ${s.ar}`);
     const ogg = audioUrl(s);
-    if (opt.api) { progress(`${n}/${all.length} ${k}: asking the API…`); try { out.push('api: ' + JSON.stringify(await labApi(s))); } catch (e) { out.push('api FAIL ' + e.message); } }
+    let apiOgg = null;
+    if (opt.api) {
+      progress(`${n}/${all.length} ${k}: asking the API…`);
+      try { const r = await labApi(s); apiOgg = r.file && r.file.audio && r.file.audio.link; out.push('api audio link: ' + apiOgg + (apiOgg && apiOgg !== ogg ? '  (differs from the app\u2019s ' + ogg + ')' : '')); out.push('api: ' + JSON.stringify(r).slice(0, 1500)); }
+      catch (e) { out.push('api FAIL ' + e.message); }
+    }
+    if (apiOgg && apiOgg !== ogg) { progress(`${n}/${all.length} ${k}: API audio link…`); out.push('API ogg in <audio>: ' + JSON.stringify(await probeMedia(ae, apiOgg))); }
     if (opt.ogg) { progress(`${n}/${all.length} ${k}: audio file…`); out.push('ogg in <audio>: ' + JSON.stringify(await probeMedia(ae, ogg))); }
     if (opt.ogg2) { progress(`${n}/${all.length} ${k}: audio file, fresh request…`); out.push('ogg fresh in <audio>: ' + JSON.stringify(await probeMedia(ae, ogg + '?lab=' + Date.now()))); }
     if (opt.wa) { progress(`${n}/${all.length} ${k}: video file in audio player…`); out.push('webm in <audio>: ' + JSON.stringify(await probeMedia(ae, s.v))); }
     if (opt.wv) { progress(`${n}/${all.length} ${k}: video file in video player…`); out.push('webm in <video>: ' + JSON.stringify(await probeMedia(ve, s.v))); }
-    if (opt.fetch && n <= 2) {
+    if (opt.fetch && (n <= 2 || group === 'PLAYS' && k === okKeys[0])) {
       for (const [label, init] of [['fetch cors', { mode: 'cors' }], ['fetch cors+Range', { mode: 'cors', headers: { Range: 'bytes=0-4095' } }], ['fetch no-cors', { mode: 'no-cors' }]]) {
         const t0 = performance.now();
-        try { const r = await fetch(ogg + '?lab=' + Date.now(), init); out.push(`${label}: type ${r.type}, status ${r.status}, content-type ${r.headers.get('Content-Type')}, length ${r.headers.get('Content-Length')}, ${Math.round(performance.now() - t0)} ms`); try { r.body && r.body.cancel(); } catch (e) {} }
+        try { const r = await fetch((apiOgg || ogg) + '?lab=' + Date.now(), init); out.push(`${label}: type ${r.type}, status ${r.status}, content-type ${r.headers.get('Content-Type')}, length ${r.headers.get('Content-Length')}, ${Math.round(performance.now() - t0)} ms`); try { r.body && r.body.cancel(); } catch (e) {} }
         catch (e) { out.push(`${label}: FAIL ${e.name}: ${e.message} after ${Math.round(performance.now() - t0)} ms`); }
       }
     }
@@ -1224,7 +1284,12 @@ async function diagnostics() {
 window.addEventListener('error', e => log('JS error: ' + e.message + ' @' + e.lineno));
 window.addEventListener('unhandledrejection', e => log('Promise error: ' + (e.reason && e.reason.message)));
 render();
-loadBakedSongs().then(ch => { if (ch) { toast('Song list loaded from songs.json'); if (view !== 'learn' && view !== 'review') render(); } });
+loadBakedSongs().then(ch => {
+  if (ch) { toast('Song list loaded from songs.json'); if (view !== 'learn' && view !== 'review') render(); }
+  if (songs.length && needsAudioLinks().length > 20) {
+    fixAudioLinks().then(n => { toast(`Audio links fixed (${n} corrected). Save the song list file again in Settings.`); if (view === 'settings') render(); }, () => {});
+  }
+});
 </script>
 </body>
 </html>
