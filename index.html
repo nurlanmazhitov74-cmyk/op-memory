@@ -160,24 +160,37 @@ let profId = LS.get('opm.profile', 'main'); if (!profiles.find(p => p.id === pro
 const pk = (base, id = profId) => id === 'main' ? base : base + '.' + id; // storage key for the active progress save
 let prog = LS.get(pk(K.prog), {});
 let excl = new Set(LS.get(pk('opm.excl'), []));   // songs excluded from Practice (per progress save)
+let weak = new Set(LS.get(pk('opm.weak'), []));   // songs marked "weak" by hand (per progress save)
 let settings = Object.assign({ names: 'en', newPerDay: 10, lesson: 10, randomStart: true, typed: true }, LS.get(K.set, {}));
 try { localStorage.removeItem('opm.noaudio'); localStorage.removeItem('opm.acidx'); localStorage.removeItem('opm.cors'); if (typeof caches !== 'undefined') caches.delete('opm-audio-v1'); } catch (e) {}
 let daily = LS.get(pk(K.daily), { day: '', n: 0, r: 0 });
 let byKey = new Map();
-function reindex() { byKey = new Map(songs.map(s => [s.k, s])); }
+let edits = LS.get('opm.edits', {}); // song -> {t, ar, t0, ar0}: details filled in by hand; survive rebuilds and go into songs.json
+const splitArtists = a => String(a || '').split(/\s*(?:,|&|\/|\bfeat\.?|\bft\.|\bwith\b|×)\s*/i).map(x => x.trim()).filter(Boolean);
+const unknownArtist = s => !s.ar || /unknown artist/i.test(s.ar);
+function applyEdits() {
+  for (const s of songs) {
+    const e = edits[s.k]; if (!e) continue;
+    if (e.t) s.t = e.t;
+    if (e.ar) { s.ar = e.ar; s.arl = splitArtists(e.ar).map(x => x.toLowerCase()); }
+  }
+}
+let textIdx = null;
+function reindex() { applyEdits(); byKey = new Map(songs.map(s => [s.k, s])); textIdx = null; }
 reindex();
 const saveProg = () => LS.set(pk(K.prog), prog);
 const saveExcl = () => LS.set(pk('opm.excl'), Array.from(excl));
+const saveWeak = () => LS.set(pk('opm.weak'), Array.from(weak));
 const saveSet = () => LS.set(K.set, settings);
 const saveDaily = () => LS.set(pk(K.daily), daily);
 const saveProfiles = () => { LS.set('opm.profiles', profiles); LS.set('opm.profile', profId); };
 const profName = () => (profiles.find(p => p.id === profId) || {}).name || 'Main';
 function switchProfile(id) {
   profId = id; saveProfiles();
-  prog = LS.get(pk(K.prog), {}); daily = LS.get(pk(K.daily), { day: '', n: 0, r: 0 }); excl = new Set(LS.get(pk('opm.excl'), []));
+  prog = LS.get(pk(K.prog), {}); daily = LS.get(pk(K.daily), { day: '', n: 0, r: 0 }); excl = new Set(LS.get(pk('opm.excl'), [])); weak = new Set(LS.get(pk('opm.weak'), []));
   L = null; R = null; P = null; LI = null;
 }
-function profileData(id) { return { id, name: (profiles.find(p => p.id === id) || {}).name, prog: LS.get(pk(K.prog, id), {}), daily: LS.get(pk(K.daily, id), null), excl: LS.get(pk('opm.excl', id), []) }; }
+function profileData(id) { return { id, name: (profiles.find(p => p.id === id) || {}).name, prog: LS.get(pk(K.prog, id), {}), daily: LS.get(pk(K.daily, id), null), excl: LS.get(pk('opm.excl', id), []), weak: LS.get(pk('opm.weak', id), []) }; }
 const logLines = LS.get(K.log, []);
 function log(m) {
   const line = new Date().toISOString().slice(5, 19).replace('T', ' ') + ' ' + m;
@@ -288,16 +301,46 @@ const lclear = () => ltx('readwrite', st => st.clear());
 let localSet = new Set(), localReady = false;
 try { ltx('readonly', st => st.getAllKeys()).then(ks => { localSet = new Set(ks); localReady = true; if (['library', 'settings', 'today'].includes(view)) render(); }, e => log('local store: ' + e.message)); } catch (e) { log('local store unavailable: ' + e.message); }
 const onPhone = s => localSet.has(localName(s));
+/* Exact length of an Ogg file without playing it: the last page's granule position / sample rate (Opus: 48 kHz minus pre-skip). */
+const idx4 = (a, str) => { const c = Array.from(str, ch => ch.charCodeAt(0)); outer: for (let i = 0; i <= a.length - c.length; i++) { for (let j = 0; j < c.length; j++) if (a[i + j] !== c[j]) continue outer; return i; } return -1; };
+async function oggDuration(blob) {
+  const head = new Uint8Array(await blob.slice(0, 8192).arrayBuffer());
+  const tail = new Uint8Array(await blob.slice(Math.max(0, blob.size - 131072)).arrayBuffer());
+  let rate = 0, pre = 0;
+  const io = idx4(head, 'OpusHead');
+  if (io >= 0) { rate = 48000; pre = head[io + 10] | (head[io + 11] << 8); }
+  else { const iv = idx4(head, '\x01vorbis'); if (iv < 0) return 0; const o = iv + 7; rate = (head[o + 5] | head[o + 6] << 8 | head[o + 7] << 16 | head[o + 8] << 24) >>> 0; }
+  if (!rate) return 0;
+  for (let i = tail.length - 27; i >= 0; i--) {
+    if (tail[i] !== 0x4f || tail[i + 1] !== 0x67 || tail[i + 2] !== 0x67 || tail[i + 3] !== 0x53) continue;
+    const dv = new DataView(tail.buffer, tail.byteOffset + i + 6, 8);
+    const g = dv.getUint32(4, true) * 4294967296 + dv.getUint32(0, true);
+    if (g > 0 && g < 2 ** 52) return Math.max(0, (g - pre) / rate);
+  }
+  return 0;
+}
+async function measureLocal(names, onStep) {
+  const byName = new Map(); for (const x of songs) { const n = localName(x); if (!byName.has(n)) byName.set(n, []); byName.get(n).push(x); }
+  let n = 0, ok = 0;
+  for (const name of names) {
+    n++; if (onStep && n % 20 === 0) onStep(n);
+    try { const b = await lget(name); if (!b) continue; const d = await oggDuration(b); if (d > 5) { for (const x of byName.get(name) || []) x.d = +d.toFixed(1); ok++; } }
+    catch (e) { log('measure failed ' + name + ': ' + e.message); }
+  }
+  if (ok) { meta = Object.assign({}, meta, { built: Date.now() }); LS.set(K.songs, songs); LS.set(K.meta, meta); }
+  return ok;
+}
 let curObj = null, curObjName = '', curLocal = false;
 let playStartedAt = 0, onEnded = null, curWrap = null, curBar = null, curSong = null, curUrl = '', mountId = 0, curStart = 0;
 let wantPlay = false, lastPos = 0, tries = 0, recovering = false, lastProgressAt = 0, lastProgressPos = -1, retryT = null;
 const fmt = t => { t = Math.max(0, Math.floor(t || 0)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
 const isSilent = () => String(audio.src).startsWith('data:');
+const knownDur = s => s && (durs[s.k] || s.d) || 0;
 function realDur() {
-  if (curSong && durs[curSong.k]) return Math.max(durs[curSong.k], audio.currentTime || 0);
+  if (knownDur(curSong)) return Math.max(knownDur(curSong), audio.currentTime || 0);
   const d = audio.duration; return isFinite(d) && d > 0 ? Math.max(d, audio.currentTime || 0) : NaN;
 }
-const durText = d => (curSong && durs[curSong.k] ? '' : '~') + fmt(d);
+const durText = d => (knownDur(curSong) ? '' : '~') + fmt(d);
 function updBar() {
   if (!curBar) return;
   const d = realDur(), c = audio.currentTime;
@@ -686,31 +729,30 @@ function renderReview() {
 /* ============ Practice (any time, shuffled, no effect on the review schedule) ============ */
 let P = null;
 function practicePool(kind) {
-  let pool = kind === 'all' ? songs.slice() : kind === 'hard' ? learnedList().filter(s => (prog[s.k].lap || 0) >= 2 || (prog[s.k].dm || 0) >= 2) : learnedList();
+  let pool = kind === 'all' ? songs.slice() : kind === 'weak' ? songs.filter(s => weak.has(s.k)) : kind === 'hard' ? learnedList().filter(s => (prog[s.k].lap || 0) >= 2 || (prog[s.k].dm || 0) >= 2) : learnedList();
   return pool.filter(s => !excl.has(s.k));
 }
 function renderPractice() {
   if (P && P.running) return renderPracticeQ();
-  const pr = Object.assign({ pool: 'learned', count: 20, typed: false, details: false, rand: false }, LS.get('opm.prac', {}));
+  const pr = Object.assign({ pool: 'learned', count: 20, three: false, rand: false }, LS.get('opm.prac', {}));
   const n = k => practicePool(k).length;
   const sel = (id, val, opts) => `<select id="${id}">${opts.map(([v, l]) => `<option value="${v}" ${String(val) === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
   const sw = (id, val) => `<label class="sw"><input type="checkbox" id="${id}" ${val ? 'checked' : ''}><span></span></label>`;
   app.innerHTML = `<div class="topbar"><button class="x" id="back">‹ Today</button></div><h1>Practice</h1>
-    <div class="small mut" style="margin:-8px 0 12px">Shuffled, as often as you like. Your review schedule isn’t touched.</div>
+    <div class="small mut" style="margin:-8px 0 12px">Type what you hear, shuffled, as often as you like. Your review schedule isn’t touched.</div>
     <div class="card">
-      <div class="set"><div>Songs</div>${sel('pp', pr.pool, [['learned', `Learned (${n('learned')})`], ['hard', `Ones you keep missing (${n('hard')})`], ['all', `All songs (${n('all')})`]])}</div>
+      <div class="set"><div>Songs</div>${sel('pp', pr.pool, [['learned', `Learned (${n('learned')})`], ['weak', `Marked weak (${n('weak')})`], ['hard', `Ones you keep missing (${n('hard')})`], ['all', `All songs (${n('all')})`]])}</div>
       <div class="set"><div>How many</div>${sel('pc', pr.count, [[10, 10], [20, 20], [50, 50], [100, 100], [0, 'All of them']])}</div>
-      <div class="set"><div>Type the answers<div class="tiny mut">Instead of multiple choice</div></div>${sw('pt', pr.typed)}</div>
-      <div class="set"><div>Also ask song titles and artists</div>${sw('pd', pr.details)}</div>
+      <div class="set"><div>Also type song title and artist<div class="tiny mut">Three fields: anime, song, artist</div></div>${sw('p3', pr.three)}</div>
       <div class="set"><div>Start at a random point in the song</div>${sw('pr', pr.rand)}</div>
     </div>
     ${P && P.result ? P.result : ''}
     <button class="btn" id="go">Start</button>
-    ${excl.size ? `<div class="tiny mut" style="text-align:center;margin-top:8px">${excl.size} song${excl.size > 1 ? 's' : ''} excluded from Practice (Library → “Not in practice”)</div>` : ''}`;
+    <div class="tiny mut" style="text-align:center;margin-top:8px">Mark weak songs or exclude songs in Library.${excl.size ? ` ${excl.size} excluded.` : ''}</div>`;
   $('#back').onclick = () => { P = null; go('today'); };
   if ($('#again')) $('#again').onclick = () => startPractice(P.missed.slice(), P.opt);
   $('#go').onclick = () => {
-    const o = { pool: $('#pp').value, count: +$('#pc').value, typed: $('#pt').checked, details: $('#pd').checked, rand: $('#pr').checked };
+    const o = { pool: $('#pp').value, count: +$('#pc').value, three: $('#p3').checked, rand: $('#pr').checked };
     LS.set('opm.prac', o);
     let list = shuffle(practicePool(o.pool)); if (o.count) list = list.slice(0, o.count);
     if (!list.length) return toast('No songs to practice with these settings');
@@ -718,34 +760,95 @@ function renderPractice() {
   };
 }
 function startPractice(keys, opt) {
-  P = { running: true, queue: shuffle(keys), total: keys.length, done: 0, ok: 0, missed: [], opt };
+  P = { running: true, queue: shuffle(keys), total: keys.length, done: 0, ok: 0, missed: [], opt, f: { anime: [0, 0], title: [0, 0], artist: [0, 0] } };
   go('practice');
 }
 function endPractice() {
   const pct = P.done ? Math.round(P.ok / P.done * 100) : 0;
+  const fl = P.opt.three ? ['anime', 'title', 'artist'].filter(f => P.f[f][1]).map(f => `${FIELD_LBL[f]} ${P.f[f][0]}/${P.f[f][1]}`).join(' · ') : '';
   P.running = false;
-  P.result = `<div class="card"><b>Last round:</b> ${P.ok} of ${P.done} right (${pct}%).
+  P.result = `<div class="card"><b>Last round:</b> ${P.ok} of ${P.done} fully right (${pct}%).${fl ? `<div class="small mut" style="margin-top:4px">${fl}</div>` : ''}
     ${P.missed.length ? `<div class="small mut" style="margin-top:6px">Missed: ${P.missed.slice(0, 12).map(k => esc(nm(byKey.get(k)))).join(', ')}${P.missed.length > 12 ? '…' : ''}</div><button class="btn sec" id="again">Practice the ${P.missed.length} missed again</button>` : ''}</div>`;
   go('practice');
 }
+const FIELD_LBL = { anime: 'Anime', title: 'Song', artist: 'Artist' };
+function textIndex() {
+  if (textIdx) return textIdx;
+  const t = new Map(), a = new Map();
+  for (const s of songs) {
+    if (s.t && !/unknown title/i.test(s.t) && !t.has(norm(s.t))) t.set(norm(s.t), s.t);
+    if (!unknownArtist(s)) for (const x of [s.ar, ...splitArtists(s.ar)]) if (x && !a.has(norm(x))) a.set(norm(x), x);
+  }
+  return textIdx = { title: Array.from(t.values()).sort(), artist: Array.from(a.values()).sort() };
+}
+function fuzzyEq(input, target) {
+  const n = norm(input), m = norm(target);
+  if (!n || !m) return false;
+  if (n === m) return true;
+  if (m.length > 4 && 1 - lev(m, n) / Math.max(m.length, n.length) >= 0.8) return true;
+  return m.length > 8 && m.includes(n) && n.length >= m.length * 0.6;
+}
+const checkTitle = (s, v) => fuzzyEq(v, s.t);
+const checkArtist = (s, v) => [s.ar, ...splitArtists(s.ar)].some(x => fuzzyEq(v, x));
 function renderPracticeQ() {
   if (!P.queue.length) return endPractice();
   const s = byKey.get(P.queue[0]);
   if (!s) { P.queue.shift(); return renderPracticeQ(); }
-  let variant = 'anime';
-  if (P.opt.details) { const r = Math.random(); if (r < 0.25) variant = 'title'; else if (r < 0.5) variant = 'artist'; }
   const start = P.opt.rand ? 10 + Math.floor(Math.random() * 50) : 0;
-  renderQuestion(s, variant, P.opt.typed && variant === 'anime', ok => {
-    P.queue.shift(); P.done++;
-    if (ok) P.ok++; else if (!P.missed.includes(s.k)) P.missed.push(s.k);
-  }, () => { renderPracticeQ(); window.scrollTo(0, 0); }, {
-    label: `${P.done + 1}/${P.total} · ${P.ok} right`, progress: P.done / P.total * 100, start,
-    onQuit: () => { stopPlayer(); endPractice(); },
-    after: box => {
-      box.insertAdjacentHTML('beforeend', `<button class="btn ghost" id="exq">${excl.has(s.k) ? 'Excluded from Practice · undo' : 'Exclude this song from Practice'}</button>`);
-      $('#exq').onclick = () => { if (excl.has(s.k)) excl.delete(s.k); else excl.add(s.k); saveExcl(); $('#exq').textContent = excl.has(s.k) ? 'Excluded from Practice · undo' : 'Exclude this song from Practice'; };
-    }
+  const fields = P.opt.three ? ['anime', 'title', 'artist'].filter(f => !(f === 'artist' && unknownArtist(s)) && !(f === 'title' && /unknown title/i.test(s.t))) : ['anime'];
+  const skippedArtist = P.opt.three && unknownArtist(s);
+  app.innerHTML = topbar(`${P.done + 1}/${P.total} · ${P.ok} right`, P.done / P.total * 100) + `<div id="pl"></div>
+    <div class="q">${P.opt.three ? 'Name the anime, song and artist' : 'Which anime is this from?'}</div>
+    <div id="ans">${fields.map(f => `<div style="margin-top:8px"><input type="text" data-f="${f}" placeholder="${FIELD_LBL[f]}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"><div class="sug" data-s="${f}"></div></div>`).join('')}
+      ${skippedArtist ? '<div class="tiny mut" style="margin-top:6px">Artist unknown for this song, so it’s not asked. You can fill it in from Library.</div>' : ''}
+      <div class="row"><button class="btn sec" id="idk">Don’t know</button><button class="btn" id="sub">Check</button></div></div>
+    <div id="after"></div>`;
+  $('#quit').onclick = () => { stopPlayer(); endPractice(); };
+  const w = mountPlayer($('#pl'), s, { start, masked: true });
+  const inputs = $$('#ans input');
+  const lists = { anime: () => nameIndex(), title: () => textIndex().title, artist: () => textIndex().artist };
+  inputs.forEach((inp, i) => {
+    const f = inp.dataset.f, sug = $(`#ans [data-s=${f}]`);
+    inp.oninput = () => {
+      const q = norm(inp.value); if (q.length < 2) { sug.innerHTML = ''; return; }
+      const hits = lists[f]().filter(x => norm(x).includes(q)).slice(0, 5);
+      sug.innerHTML = hits.map(h => `<button data-n="${esc(h)}">${esc(h)}</button>`).join('');
+      $$('button', sug).forEach(b => b.onclick = () => { inp.value = b.dataset.n; sug.innerHTML = ''; if (inputs[i + 1]) inputs[i + 1].focus(); });
+    };
+    inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); sug.innerHTML = ''; if (inputs[i + 1]) inputs[i + 1].focus(); else submit(); } };
   });
+  let answered = false;
+  const submit = giveUp => {
+    if (answered) return; answered = true;
+    const res = {};
+    for (const inp of inputs) {
+      const f = inp.dataset.f, v = giveUp ? '' : inp.value;
+      res[f] = { v, ok: f === 'anime' ? checkTyped(s, v) : (f === 'title' ? checkTitle(s, v) : checkArtist(s, v)) ? 2 : 0 };
+      inp.disabled = true;
+    }
+    $$('#ans .sug').forEach(x => x.innerHTML = ''); $('#sub').disabled = true; $('#idk').disabled = true;
+    const allOk = fields.every(f => res[f].ok > 0);
+    P.queue.shift(); P.done++;
+    for (const f of fields) { P.f[f][1]++; if (res[f].ok > 0) P.f[f][0]++; }
+    if (allOk) P.ok++; else if (!P.missed.includes(s.k)) P.missed.push(s.k);
+    reveal(w);
+    const truth = { anime: nm(s), title: s.t, artist: s.ar };
+    const lines = fields.map(f => {
+      const r = res[f];
+      if (r.ok === 2 || (f !== 'anime' && r.ok)) return `<div class="result ok" style="margin:4px 0">✓ ${FIELD_LBL[f]}: ${esc(truth[f])}</div>`;
+      if (r.ok === 1) return `<div class="result ok" style="margin:4px 0">✓ ${FIELD_LBL[f]}: right franchise, this one is ${esc(truth[f])}</div>`;
+      return `<div class="result bad" style="margin:4px 0">✗ ${FIELD_LBL[f]}: ${esc(truth[f])}${r.v ? ` <span class="small mut">(you wrote “${esc(r.v)}”)</span>` : ''}</div>`;
+    }).join('');
+    $('#after').innerHTML = `<div style="margin-top:10px">${lines}</div>${infoBlock(s)}${connections(s)}<button class="btn" id="next">Next</button>
+      <div class="row"><button class="btn ghost" id="wkq">${weak.has(s.k) ? 'Weak · unmark' : 'Mark weak'}</button><button class="btn ghost" id="exq">${excl.has(s.k) ? 'Excluded · undo' : 'Exclude from Practice'}</button></div>`;
+    $('#next').onclick = () => { renderPracticeQ(); window.scrollTo(0, 0); };
+    $('#wkq').onclick = () => { if (weak.has(s.k)) weak.delete(s.k); else weak.add(s.k); saveWeak(); $('#wkq').textContent = weak.has(s.k) ? 'Weak · unmark' : 'Mark weak'; };
+    $('#exq').onclick = () => { if (excl.has(s.k)) excl.delete(s.k); else excl.add(s.k); saveExcl(); $('#exq').textContent = excl.has(s.k) ? 'Excluded · undo' : 'Exclude from Practice'; };
+    $('#after').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  $('#sub').onclick = () => submit(false);
+  $('#idk').onclick = () => submit(true);
+  try { inputs[0].focus(); } catch (e) {}
 }
 
 /* ============ Listen ============ */
@@ -783,7 +886,7 @@ function renderListen() {
 }
 
 /* ============ Library ============ */
-let libFilter = 'all', libQuery = '', libShow = 120;
+let libFilter = 'all', libMark = 'any', libQuery = '', libShow = 120, quickMark = false;
 function renderLibrary() {
   const learned = learnedList();
   const forecast = [];
@@ -798,24 +901,36 @@ function renderLibrary() {
     <div class="card"><div class="small mut">Reviews coming up</div>
       <div class="bars">${forecast.map((n, d) => `<div>${n}<i style="height:${n / fmax * 60}px"></i>${lbl(d)}</div>`).join('')}</div></div>
     <input type="search" id="q" placeholder="Search anime, song or artist" value="${esc(libQuery)}">
-    <div class="chips">${[['all', 'All'], ['learn', 'Learning'], ['mature', 'Known'], ['hard', 'Struggling'], ['new', 'New'], ['phone', 'On phone'], ['nophone', 'Not on phone'], ['excl', 'Not in practice']].map(([k, l]) => `<button data-f="${k}" class="${libFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="row" style="margin-top:10px">
+      <select id="fs">${[['all', 'Status: all'], ['new', 'New'], ['learn', 'Learning'], ['mature', 'Known'], ['hard', 'Struggling']].map(([k, l]) => `<option value="${k}" ${libFilter === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <select id="fm">${[['any', 'Marks: any'], ['weak', 'Marked weak'], ['excl', 'Not in practice'], ['unk', 'Unknown artist'], ['edited', 'Edited by you'], ['phone', 'On phone'], ['nophone', 'Not on phone']].map(([k, l]) => `<option value="${k}" ${libMark === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    </div>
+    <button class="btn ${quickMark ? '' : 'sec'}" id="qm" style="padding:10px;font-size:15px">${quickMark ? 'Quick-mark on: tap songs to mark/unmark weak' : 'Quick-mark weak songs'}</button>
     <div class="list" id="list"></div>`;
   const draw = () => {
     const q = norm(libQuery);
-    let list = songs.filter(s => libFilter === 'all' || (libFilter === 'excl' ? excl.has(s.k) : libFilter === 'phone' ? onPhone(s) : libFilter === 'nophone' ? !onPhone(s) : status(s)[0] === libFilter));
+    const markOk = s => libMark === 'any' || (libMark === 'weak' ? weak.has(s.k) : libMark === 'excl' ? excl.has(s.k) : libMark === 'unk' ? unknownArtist(s) : libMark === 'edited' ? !!edits[s.k] : libMark === 'phone' ? onPhone(s) : !onPhone(s));
+    let list = songs.filter(s => (libFilter === 'all' || status(s)[0] === libFilter) && markOk(s));
     if (q) list = list.filter(s => [s.ro, s.en, s.t, s.ar, ...(s.syn || [])].some(x => norm(x).includes(q)));
     list.sort((a, b) => a.r - b.r);
     $('#list').innerHTML = `<div class="tiny mut" style="margin:6px 0">${list.length} songs</div>` + list.slice(0, libShow).map(s => {
       const [k, l] = status(s);
       return `<div class="item" data-k="${esc(s.k)}"><img loading="lazy" src="${esc(s.cov)}" alt="" onerror="this.style.visibility='hidden'"><div class="t">
         <div><b>${esc(nm(s))}</b></div><div class="small">${esc(s.sl)} · ${esc(s.t)}</div><div class="small mut">${esc(s.ar)}</div></div>
-        <span class="chip ${k}">${l}</span>${excl.has(s.k) ? '<span class="chip" style="margin-left:4px">✕ practice</span>' : ''}${onPhone(s) ? '<span class="chip" style="margin-left:4px" title="On this phone">📱</span>' : ''}</div>`;
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px"><span class="chip ${k}">${l}</span>${weak.has(s.k) ? '<span class="chip hard">weak</span>' : ''}${excl.has(s.k) ? '<span class="chip">✕ practice</span>' : ''}${onPhone(s) ? '<span class="chip" title="On this phone">📱</span>' : ''}</div></div>`;
     }).join('') + (list.length > libShow ? '<button class="btn sec" id="more">Show more</button>' : '');
-    $$('#list .item').forEach(el => el.onclick = () => openSheet(byKey.get(el.dataset.k)));
+    $$('#list .item').forEach(el => el.onclick = () => {
+      const k = el.dataset.k;
+      if (!quickMark) return openSheet(byKey.get(k));
+      if (weak.has(k)) weak.delete(k); else weak.add(k); saveWeak();
+      const y = window.scrollY; draw(); window.scrollTo(0, y);
+    });
     if ($('#more')) $('#more').onclick = () => { libShow += 200; draw(); };
   };
   $('#q').oninput = e => { libQuery = e.target.value; libShow = 120; draw(); };
-  $$('.chips button').forEach(b => b.onclick = () => { libFilter = b.dataset.f; libShow = 120; $$('.chips button').forEach(x => x.classList.toggle('on', x === b)); draw(); });
+  $('#fs').onchange = e => { libFilter = e.target.value; libShow = 120; draw(); };
+  $('#fm').onchange = e => { libMark = e.target.value; libShow = 120; draw(); };
+  $('#qm').onclick = () => { quickMark = !quickMark; const b = $('#qm'); b.classList.toggle('sec', !quickMark); b.textContent = quickMark ? 'Quick-mark on: tap songs to mark/unmark weak' : 'Quick-mark weak songs'; };
   draw();
 }
 function openSheet(s) {
@@ -823,14 +938,34 @@ function openSheet(s) {
   const stats = c ? `<div class="card small"><div class="row"><div>Next review<br><b>${new Date(c.due).toLocaleDateString()}</b></div><div>Interval<br><b>${c.ivl} day${c.ivl === 1 ? '' : 's'}</b></div><div>Misses<br><b>${c.lap || 0}</b></div></div></div>` : '';
   sh.innerHTML = `<div class="bg"></div><div class="body"><div id="spl"></div>${infoBlock(s)}${stats}${connections(s)}
     <div class="tiny mut" style="margin:4px 2px">Popularity rank #${s.r}</div>
-    <button class="btn sec" id="exc">${excl.has(s.k) ? 'Include in Practice again' : 'Exclude from Practice'}</button>
+    <div class="row"><button class="btn sec" id="wk">${weak.has(s.k) ? 'Unmark weak' : 'Mark weak'}</button><button class="btn sec" id="exc">${excl.has(s.k) ? 'Include in Practice' : 'Exclude from Practice'}</button></div>
+    <button class="btn sec" id="ed">Edit details${unknownArtist(s) ? ' (artist unknown)' : ''}</button><div id="edf"></div>
     ${c ? '<button class="btn danger" id="forget">Forget (learn it again from scratch)</button>' : ''}
     <button class="btn sec" id="close">Close</button></div>`;
   sh.classList.add('open');
   mountPlayer($('#spl'), s);
   const close = () => { stopPlayer(); sh.classList.remove('open'); sh.innerHTML = ''; };
   $('.bg', sh).onclick = close; $('#close').onclick = close;
-  $('#exc').onclick = () => { if (excl.has(s.k)) excl.delete(s.k); else excl.add(s.k); saveExcl(); $('#exc').textContent = excl.has(s.k) ? 'Include in Practice again' : 'Exclude from Practice'; if (view === 'library') render(); };
+  $('#exc').onclick = () => { if (excl.has(s.k)) excl.delete(s.k); else excl.add(s.k); saveExcl(); $('#exc').textContent = excl.has(s.k) ? 'Include in Practice' : 'Exclude from Practice'; if (view === 'library') render(); };
+  $('#wk').onclick = () => { if (weak.has(s.k)) weak.delete(s.k); else weak.add(s.k); saveWeak(); $('#wk').textContent = weak.has(s.k) ? 'Unmark weak' : 'Mark weak'; if (view === 'library') render(); };
+  $('#ed').onclick = () => {
+    const e = edits[s.k];
+    $('#edf').innerHTML = `<div class="card" style="margin-top:10px">
+      <div class="small mut">Song title</div><input type="text" id="edt" value="${esc(s.t)}" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <div class="small mut" style="margin-top:8px">Artist <span class="tiny">(several: separate with commas)</span></div><input type="text" id="eda" value="${esc(unknownArtist(s) ? '' : s.ar)}" placeholder="Artist" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <div class="row"><button class="btn" id="eds">Save</button>${e ? '<button class="btn sec" id="edr">Undo my edits</button>' : ''}</div>
+      <div class="tiny mut" style="margin-top:6px">Saved on this phone and included when you save the song list file.</div></div>`;
+    $('#eds').onclick = () => {
+      const t = $('#edt').value.trim(), ar = $('#eda').value.trim();
+      const cur = edits[s.k] || { t0: s.t, ar0: s.ar };
+      edits[s.k] = Object.assign(cur, { t: t || cur.t0, ar: ar || cur.ar0 });
+      LS.set('opm.edits', edits); reindex(); toast('Saved'); close(); openSheet(byKey.get(s.k)); if (view === 'library') render();
+    };
+    if ($('#edr')) $('#edr').onclick = () => {
+      const o = edits[s.k]; s.t = o.t0 || s.t; s.ar = o.ar0 || s.ar; s.arl = splitArtists(s.ar).map(x => x.toLowerCase());
+      delete edits[s.k]; LS.set('opm.edits', edits); reindex(); toast('Edits undone'); close(); openSheet(byKey.get(s.k)); if (view === 'library') render();
+    };
+  };
   if ($('#forget')) $('#forget').onclick = e => {
     if (!e.target.dataset.arm) { e.target.dataset.arm = 1; e.target.textContent = 'Tap again to confirm'; return; }
     delete prog[s.k]; saveProg(); close(); render();
@@ -863,6 +998,8 @@ function renderSettings() {
     <div class="card"><div class="small mut" id="lst">${localReady ? `${songs.filter(onPhone).length} of ${songs.length} songs are on this phone and play without streaming.` : 'Checking…'}</div>
       <input type="file" id="imf" multiple accept=".ogg,audio/ogg" style="display:none">
       <button class="btn sec" id="imp">Import songs from Files</button>
+      <button class="btn sec" id="meas">Measure song lengths from stored songs</button>
+      <div class="tiny mut" style="margin-top:6px">${songs.filter(x => x.d).length} of ${songs.length} songs have an exact length. After measuring, save the song list file and upload it so every copy of the app gets them.</div>
       <div class="tiny mut" style="margin-top:6px">Pick the .ogg files the Drive script downloaded (select all in the folder). The app keeps its own copy, so you can delete them from Files afterwards. Files that don\u2019t match a song are skipped.</div>
       <div id="imo"></div>
       <button class="btn danger" id="ldel">Delete songs stored on this phone</button></div>
@@ -885,6 +1022,11 @@ function renderSettings() {
   $('#sv').onclick = saveSongsFile;
   (async () => { try { const e = await navigator.storage.estimate(); const el = $('#lst'); if (el && localReady) el.textContent += ` The app uses ${(e.usage / 1073741824).toFixed(2)} GB in total.`; } catch (e) {} })();
   $('#imp').onclick = () => $('#imf').click();
+  $('#meas').onclick = async () => {
+    $('#meas').disabled = true;
+    const n = await measureLocal(Array.from(localSet), k => { const b = $('#meas'); if (b) b.textContent = `Measuring… ${k}/${localSet.size}`; });
+    toast(`Measured ${n} songs`); render();
+  };
   $('#imf').onchange = async e => {
     const files = Array.from(e.target.files || []); e.target.value = '';
     if (!files.length) return;
@@ -900,6 +1042,7 @@ function renderSettings() {
       catch (er) { skipped.push(f.name + ' (' + er.message + ')'); log('import failed ' + f.name + ': ' + er.message); }
     }
     log(`imported ${added} of ${files.length} files`);
+    if (added) { const imported = files.map(f => f.name).filter(nm2 => localSet.has(nm2)); await measureLocal(imported); }
     toast(`Imported ${added} song${added === 1 ? '' : 's'}`);
     render();
     const o2 = $('#imo');
@@ -943,12 +1086,12 @@ function renderSettings() {
   const newProf = copy => {
     const id = 'p' + Date.now().toString(36);
     profiles.push({ id, name: copy ? profName() + ' (copy)' : 'Save ' + profiles.length });
-    if (copy) { LS.set(pk(K.prog, id), prog); LS.set(pk('opm.excl', id), Array.from(excl)); }
+    if (copy) { LS.set(pk(K.prog, id), prog); LS.set(pk('opm.excl', id), Array.from(excl)); LS.set(pk('opm.weak', id), Array.from(weak)); }
     switchProfile(id); toast('Now using ' + profName()); render();
   };
   $('#pnew').onclick = () => newProf(false);
   $('#pdup').onclick = () => newProf(true);
-  $('#bk').onclick = () => copyText(JSON.stringify({ app: 'opmemory', v: 2, at: Date.now(), settings, active: profId, profiles: profiles.map(p => profileData(p.id)) }), 'Backup copied');
+  $('#bk').onclick = () => copyText(JSON.stringify({ app: 'opmemory', v: 2, at: Date.now(), settings, edits, active: profId, profiles: profiles.map(p => profileData(p.id)) }), 'Backup copied');
   $('#rst').onclick = () => {
     try {
       const b = JSON.parse($('#bkt').value.trim());
@@ -956,10 +1099,11 @@ function renderSettings() {
       if (b.profiles) {
         profiles = b.profiles.map(p => ({ id: p.id, name: p.name || p.id }));
         if (!profiles.find(p => p.id === 'main')) profiles.unshift({ id: 'main', name: 'Main' });
-        for (const p of b.profiles) { LS.set(pk(K.prog, p.id), p.prog || {}); if (p.daily) LS.set(pk(K.daily, p.id), p.daily); LS.set(pk('opm.excl', p.id), p.excl || []); }
+        for (const p of b.profiles) { LS.set(pk(K.prog, p.id), p.prog || {}); if (p.daily) LS.set(pk(K.daily, p.id), p.daily); LS.set(pk('opm.excl', p.id), p.excl || []); LS.set(pk('opm.weak', p.id), p.weak || []); }
         switchProfile(profiles.find(p => p.id === b.active) ? b.active : 'main');
       } else { prog = b.prog; saveProg(); } // old single-save backup goes into the active save
       if (b.settings) { settings = Object.assign(settings, b.settings); saveSet(); }
+      if (b.edits) { edits = Object.assign(edits, b.edits); LS.set('opm.edits', edits); reindex(); }
       toast(`Restored (${profiles.length} save${profiles.length > 1 ? 's' : ''})`); render();
     } catch (e) { toast('Could not restore: ' + e.message); }
   };
@@ -1034,7 +1178,7 @@ function fixAudioLinks(st) {
 
 /* ============ song list file (songs.json in the repo) ============ */
 function saveSongsFile() {
-  const data = JSON.stringify({ app: 'opmemory-songs', v: 1, built: (meta && meta.built) || Date.now(), songs: songs.filter(x => x.r <= 1000) });
+  const data = JSON.stringify({ app: 'opmemory-songs', v: 1, built: (meta && meta.built) || Date.now(), edits, songs: songs.filter(x => x.r <= 1000) });
   try {
     const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
     const a = document.createElement('a'); a.href = url; a.download = 'songs.json'; document.body.appendChild(a); a.click(); a.remove();
@@ -1050,6 +1194,7 @@ async function loadBakedSongs() {
   if (songs.length && meta && meta.built >= j.built) return false;
   const keys = new Set(j.songs.map(x => x.k)); const next = j.songs.slice(); let extra = 1000;
   for (const old of songs) if (prog[old.k] && !keys.has(old.k)) { old.r = ++extra; next.push(old); }
+  if (j.edits) { edits = Object.assign({}, j.edits, edits); LS.set('opm.edits', edits); }
   songs = next; reindex(); allNames = null;
   meta = { built: j.built, n: songs.length, from: 'file' };
   LS.set(K.songs, songs); LS.set(K.meta, meta);
